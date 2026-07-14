@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from modbus_connection.model import gauge, int32, integer
+from modbus_connection.model import enum, gauge, int32, integer
 
+from .enums import SolarOperatingState
 from .model import LambdaComponent
 
 
@@ -11,7 +12,7 @@ class Solar(LambdaComponent):
     """One solar module. Addresses are relative; the block sits at 4000 + 100n."""
 
     error_number = integer(0)
-    operating_state = integer(1, signed=False)
+    operating_state = enum(1, SolarOperatingState)
     collector_temperature = gauge(2, 0.1, unit="°C")
     storage_temperature = gauge(3, 0.1, unit="°C")
     power_current = gauge(4, 0.1, unit="kW")

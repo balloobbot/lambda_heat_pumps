@@ -150,6 +150,51 @@ async def test_int32_word_order(
 
 
 @pytest.mark.asyncio
+async def test_state_registers_decode_to_states(mock_modbus_unit):
+    """A state register decodes to a state that is both an int and a label."""
+    from custom_components.lambda_heat_pumps.lambda_modbus.enums import (
+        HeatPumpOperatingState,
+        HeatPumpState,
+    )
+
+    mock_modbus_unit.holding[1002] = 5  # HP state
+    mock_modbus_unit.holding[1003] = 1  # HP operating state
+
+    controller = LambdaHeatPump(mock_modbus_unit, num_hps=1)
+    await controller.async_update()
+    heat_pump = controller.heat_pumps[0]
+
+    assert heat_pump.state is HeatPumpState.START_COMPRESSOR
+    assert heat_pump.state.label == "START COMPRESSOR"
+    assert heat_pump.operating_state is HeatPumpOperatingState.CH
+    # Still an int, so the coordinator's mode comparisons keep working.
+    assert heat_pump.operating_state == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_state_code_decodes_to_none(mock_modbus_unit):
+    """A code the controller reports but the model does not know is not guessed at."""
+    mock_modbus_unit.holding[1003] = 99
+
+    controller = LambdaHeatPump(mock_modbus_unit, num_hps=1)
+    await controller.async_update()
+
+    assert controller.heat_pumps[0].operating_state is None
+
+
+def test_the_labels_match_the_integration_mappings():
+    """The enums carry exactly the labels the integration has always shown."""
+    from custom_components.lambda_heat_pumps import const_mapping
+    from custom_components.lambda_heat_pumps.lambda_modbus.enums import HeatPumpState
+
+    assert const_mapping.HP_STATE[5] == "START COMPRESSOR"
+    assert const_mapping.HP_STATE[2] == "RESTART-BLOCK"
+    assert const_mapping.HP_OPERATING_STATE[1] == "CH"
+    assert const_mapping.HC_OPERATING_MODE[-1] == "Unknown"
+    assert const_mapping.HP_STATE == {m.value: m.label for m in HeatPumpState}
+
+
+@pytest.mark.asyncio
 async def test_a_write_reverses_the_scale(mock_modbus_unit):
     """Writing an engineering value stores the raw register the device expects."""
     controller = LambdaHeatPump(mock_modbus_unit, num_boil=1)
@@ -157,6 +202,16 @@ async def test_a_write_reverses_the_scale(mock_modbus_unit):
     await controller.boilers[0].write("target_high_temperature", 52.5)
 
     assert await mock_modbus_unit.read_holding_registers(2050, 1) == [525]
+
+
+@pytest.mark.asyncio
+async def test_a_write_encodes_a_negative_value(mock_modbus_unit):
+    """A negative setpoint is written as two's complement, without a helper."""
+    controller = LambdaHeatPump(mock_modbus_unit, num_hc=1)
+
+    await controller.heating_circuits[0].write("set_flow_line_offset_temperature", -2.5)
+
+    assert await mock_modbus_unit.read_holding_registers(5050, 1) == [0xFFE7]  # -25
 
 
 @pytest.mark.asyncio

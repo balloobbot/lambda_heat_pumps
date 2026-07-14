@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
-from modbus_connection.model import gauge, int32, integer
+from modbus_connection.model import enum, gauge, int32, integer
 
+from .enums import (
+    HeatPumpErrorState,
+    HeatPumpOperatingState,
+    HeatPumpState,
+    RelaisState,
+)
 from .model import LambdaComponent
 
 
 class HeatPump(LambdaComponent):
     """One heat pump. Addresses are relative; the block sits at 1000 + 100n."""
 
-    error_state = integer(0, signed=False)
+    error_state = enum(0, HeatPumpErrorState)
     error_number = integer(1)
-    state = integer(2, signed=False)
-    operating_state = integer(3, signed=False)
+    state = enum(2, HeatPumpState)
+    operating_state = enum(3, HeatPumpOperatingState)
 
     flow_line_temperature = gauge(4, 0.01, unit="°C")
     return_line_temperature = gauge(5, 0.01, unit="°C")
@@ -33,7 +39,7 @@ class HeatPump(LambdaComponent):
     requested_flow_to_return_line_temperature_difference = gauge(
         18, 0.1, writable=True, unit="°C"
     )
-    relais_state_2nd_heating_stage = integer(19)
+    relais_state_2nd_heating_stage = enum(19, RelaisState, signed=True)
 
     compressor_power_consumption_accumulated = int32(20, unit="Wh")
     compressor_thermal_energy_output_accumulated = int32(22, unit="Wh")

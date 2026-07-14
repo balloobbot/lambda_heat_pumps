@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from modbus_connection.model import gauge, integer
+from modbus_connection.model import enum, gauge, integer
 
+from .enums import HeatingCircuitOperatingMode, HeatingCircuitOperatingState
 from .model import LambdaComponent
 
 
@@ -11,12 +12,12 @@ class HeatingCircuit(LambdaComponent):
     """One heating circuit. Addresses are relative; the block sits at 5000 + 100n."""
 
     error_number = integer(0)
-    operating_state = integer(1, signed=False)
+    operating_state = enum(1, HeatingCircuitOperatingState)
     flow_line_temperature = gauge(2, 0.1, unit="°C")
     return_line_temperature = gauge(3, 0.1, unit="°C")
     room_device_temperature = gauge(4, 0.1, writable=True, unit="°C")
     set_flow_line_temperature = gauge(5, 0.1, writable=True, unit="°C")
-    operating_mode = integer(6, writable=True)
+    operating_mode = enum(6, HeatingCircuitOperatingMode, signed=True, writable=True)
     flow_line_temperature_setpoint = gauge(7, 0.1, writable=True, unit="°C")
 
     # Firmware 3+ reports the setpoint the controller actually acts on at the

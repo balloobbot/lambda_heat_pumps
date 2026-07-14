@@ -41,7 +41,8 @@ from .const import (
     COP_MODES,
     COP_PERIODS,
 )
-from .coordinator import LambdaDataUpdateCoordinator
+from .coordinator import GENERAL_PREFIXES, MODULE_TEMPLATES, LambdaDataUpdateCoordinator
+from .lambda_modbus.enums import LambdaState
 from .utils import (
     apply_energy_period_reset,
     build_device_info,
@@ -57,22 +58,9 @@ from .utils import (
     restore_energy_period_state,
     resolve_entity_id_by_unique_id,
 )
-from .const_mapping import HP_ERROR_STATE  # noqa: F401
-from .const_mapping import HP_STATE  # noqa: F401
-
-from .const_mapping import HP_RELAIS_STATE_2ND_HEATING_STAGE  # noqa: F401
-from .const_mapping import HP_OPERATING_STATE  # noqa: F401
-from .const_mapping import HP_REQUEST_TYPE  # noqa: F401
-from .const_mapping import BOIL_CIRCULATION_PUMP_STATE  # noqa: F401
-from .const_mapping import BOIL_OPERATING_STATE  # noqa: F401
-from .const_mapping import HC_OPERATING_STATE  # noqa: F401
-from .const_mapping import HC_OPERATING_MODE  # noqa: F401
-from .const_mapping import BUFF_OPERATING_STATE  # noqa: F401
-from .const_mapping import BUFF_REQUEST_TYPE  # noqa: F401
-from .const_mapping import SOL_OPERATING_STATE  # noqa: F401
-from .const_mapping import MAIN_CIRCULATION_PUMP_STATE  # noqa: F401
-from .const_mapping import MAIN_AMBIENT_OPERATING_STATE  # noqa: F401
-from .const_mapping import MAIN_E_MANAGER_OPERATING_STATE  # noqa: F401
+# The state mappings used to be imported here purely so that native_value could
+# find them in globals() by munging the sensor's display name into a variable
+# name. The model resolves state codes itself now, so nothing looks them up.
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -174,6 +162,7 @@ async def async_setup_entry(
         # Wenn override_name verwendet wird, nutze diesen; sonst den übersetzten Namen
         final_name = override_name if override_name else names["name"]
 
+        general_prefix = next(p for p in GENERAL_PREFIXES if sensor_id.startswith(p))
         general_sensors.append(
             LambdaSensor(
                 coordinator=coordinator,
@@ -188,6 +177,8 @@ async def async_setup_entry(
                 relative_address=sensor_info.get("address", 0),
                 data_type=sensor_info.get("data_type", ""),
                 device_type=sensor_info.get("device_type", "main"),
+                component_attr=GENERAL_PREFIXES[general_prefix],
+                field=sensor_id.removeprefix(general_prefix),
                 txt_mapping=sensor_info.get("txt_mapping", False),
                 precision=sensor_info.get("precision", None),
                 entity_id=entity_id,
@@ -304,6 +295,9 @@ async def async_setup_entry(
                         relative_address=sensor_info.get("relative_address", 0),
                         data_type=sensor_info.get("data_type", ""),
                         device_type=device_type,
+                        component_attr=MODULE_TEMPLATES[prefix][1],
+                        component_index=idx,
+                        field=sensor_id,
                         txt_mapping=sensor_info.get("txt_mapping", False),
                         precision=sensor_info.get("precision", None),
                         entity_id=entity_id,
@@ -2543,6 +2537,9 @@ class LambdaSensor(CoordinatorEntity[LambdaDataUpdateCoordinator], SensorEntity)
         relative_address: int,
         data_type: str,
         device_type: str,
+        component_attr: str,
+        field: str,
+        component_index: int | None = None,
         txt_mapping: bool = False,
         precision: int | None = None,
         entity_id: str | None = None,
@@ -2553,6 +2550,10 @@ class LambdaSensor(CoordinatorEntity[LambdaDataUpdateCoordinator], SensorEntity)
         super().__init__(coordinator)
         self._entry = entry
         self._sensor_id = sensor_id
+        # Where this sensor's value lives on the device model.
+        self._component_attr = component_attr
+        self._component_index = component_index
+        self._field = field
         self._attr_name = name
         self._attr_unique_id = unique_id  # Immer die generierte ID verwenden
         self.entity_id = entity_id or f"sensor.{sensor_id}"
@@ -2693,83 +2694,26 @@ class LambdaSensor(CoordinatorEntity[LambdaDataUpdateCoordinator], SensorEntity)
 
     @property
     def native_value(self) -> float | str | None:
-        if not self.coordinator.data:
+        """The sensor's value, read straight off the device model.
+
+        The model already decoded it — scaled, signed, and (for a state
+        register) resolved to one of the controller's state codes — so there is
+        nothing left to do here but hand it over. A state that the controller
+        reports but the model does not know decodes to None; lambda_modbus logs
+        the unknown code once.
+        """
+        component = self.coordinator.component_for(
+            self._component_attr, self._component_index
+        )
+        if component is None:
             return None
-        value = self.coordinator.data.get(self._sensor_id)
 
-        # Debug logging für undokumentierte Register
-        if self._sensor_id and (
-            "extended" in self._sensor_id
-            or "config" in self._sensor_id
-            or "additional" in self._sensor_id
-            or "ambient" in self._sensor_id
-            or "compressor_outlet" in self._sensor_id
-            or "maximum_value" in self._sensor_id
-        ):
-            _LOGGER.debug(
-                "Debug sensor %s: value=%s, coordinator.data has %d entries",
-                self._sensor_id,
-                value,
-                len(self.coordinator.data) if self.coordinator.data else 0,
-            )
-
+        value = getattr(component, self._field, None)
         if value is None:
             return None
-        if self._is_state_sensor:
-            try:
-                numeric_value = int(float(value))
-            except (ValueError, TypeError):
-                return f"Unknown state ({value})"
-
-            # Extract base name without index
-            # (e.g. "HP1 Operating State" -> "Operating State")
-            if self._base_state_name:
-                base_name = self._base_state_name
-            else:
-                base_name = self._attr_name or ""
-                if (
-                    self._device_type
-                    and base_name
-                    and self._device_type.upper() in base_name
-                ):
-                    # Remove prefix and index (e.g. "HP1 " oder "BOIL2 ")
-                    base_name = " ".join(base_name.split()[1:])
-            # Ersetze auch Bindestriche durch Unterstriche
-            if base_name:
-                mapping_name = (
-                    f"{self._device_type.upper()}_"
-                    f"{base_name.upper().replace(' ', '_').replace('-', '_')}"
-                )
-            try:
-                state_mapping = globals().get(mapping_name)
-                if state_mapping is not None:
-                    return state_mapping.get(
-                        numeric_value, f"Unknown state ({numeric_value})"
-                    )
-                _LOGGER.warning(
-                    "No state mapping found f. sensor '%s' (tried mapping: %s)"
-                    "with value %s. Sensor details: device_type=%s, "
-                    "register=%d, data_type=%s. This sensor is marked as state"
-                    "sensor (txt_mapping=True) but no corresponding mapping "
-                    "dictionary was found.",
-                    self._attr_name,
-                    mapping_name,
-                    numeric_value,
-                    self._device_type,
-                    self._relative_address,
-                    self._data_type,
-                )
-                return f"Unknown mapping for state ({numeric_value})"
-            except Exception as e:
-                _LOGGER.error(
-                    "Error accessing mapping dictionary: %s",
-                    str(e),
-                )
-                return f"Error loading mappings ({numeric_value})"
-        try:
-            return float(value)
-        except (ValueError, TypeError):
-            return None
+        if isinstance(value, LambdaState):
+            return value.label
+        return value
 
     @property
     def native_unit_of_measurement(self) -> str | None:

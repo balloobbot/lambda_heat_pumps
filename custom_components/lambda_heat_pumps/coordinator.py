@@ -873,6 +873,21 @@ class LambdaDataUpdateCoordinator(DataUpdateCoordinator):
         )
         return device
 
+    def component_for(self, attribute: str, index: int | None = None):
+        """The modelled sub-system an entity reads from.
+
+        `attribute` is the name it has on LambdaHeatPump — `ambient`,
+        `e_manager`, or one of the module lists (`heat_pumps`, `boilers`, …), in
+        which case `index` is the 1-based module number. Returns None before the
+        first successful update, when there is no model yet.
+        """
+        if self.device is None:
+            return None
+        target = getattr(self.device, attribute)
+        if index is None:
+            return target
+        return target[index - 1] if 1 <= index <= len(target) else None
+
     def _collect_values(self, fw_version: int) -> dict:
         """Read the modelled device's values into the flat dict the entities use.
 

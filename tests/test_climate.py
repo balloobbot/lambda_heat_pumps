@@ -203,9 +203,12 @@ async def test_lambda_climate_entity_properties():
 @pytest.mark.asyncio
 async def test_lambda_climate_entity_set_temperature():
     """Test set temperature method of LambdaClimateEntity."""
+    boiler = MagicMock()
+    boiler.write = AsyncMock()
+
     coordinator_mock = MagicMock()
     coordinator_mock.data = {}
-    coordinator_mock.async_write_registers = AsyncMock()
+    coordinator_mock.component_for = MagicMock(return_value=boiler)
     coordinator_mock.async_refresh = AsyncMock()
     coordinator_mock.async_request_refresh = AsyncMock()
 
@@ -239,8 +242,10 @@ async def test_lambda_climate_entity_set_temperature():
     with patch.object(entity, "async_write_ha_state"):
         await entity.async_set_temperature(temperature=60)
 
-        # base_address + relative_set_address (2050 für hot_water), Wert mit Scale
-        coordinator_mock.async_write_registers.assert_awaited_once_with(2050, [600])
+        # Der Wert geht in °C an das Feld; das Feld rechnet selbst in das
+        # Rohregister zurück (früher: 2050 <- [600]).
+        coordinator_mock.component_for.assert_called_once_with("boilers", 1)
+        boiler.write.assert_awaited_once_with("target_high_temperature", 60)
 
     # Überprüfe, ob der Coordinator-Cache aktualisiert wurde
     assert coordinator_mock.data["boil1_target_high_temperature"] == 60

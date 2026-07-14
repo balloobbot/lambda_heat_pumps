@@ -135,12 +135,18 @@ class LambdaClimateEntity(CoordinatorEntity, ClimateEntity):
         return self.coordinator.data.get(self._target_temperature_key)
 
     @property
-    def _target_temperature_key(self):
+    def _target(self) -> tuple[str, str]:
+        """The device-model component and field this entity's target lives on."""
         if self._climate_type == "hot_water":
-            return f"boil{self._idx}_target_high_temperature"
+            return "boilers", "target_high_temperature"
         if self._climate_type == "cooling_circuit":
-            return f"hc{self._idx}_set_cooling_mode_room_temperature"
-        return f"hc{self._idx}_target_room_temperature"
+            return "heating_circuits", "set_cooling_mode_room_temperature"
+        return "heating_circuits", "target_room_temperature"
+
+    @property
+    def _target_temperature_key(self):
+        module = "boil" if self._climate_type == "hot_water" else "hc"
+        return f"{module}{self._idx}_{self._target[1]}"
 
     @property
     def state_class(self):
@@ -156,19 +162,23 @@ class LambdaClimateEntity(CoordinatorEntity, ClimateEntity):
         temperature = kwargs.get("temperature")
         if temperature is None:
             return
-        reg_addr = self._base_address + self._template["relative_set_address"]
-        scale = self._template["scale"]
-        raw_value = int(temperature / scale)
+
+        attribute, field = self._target
+        component = self.coordinator.component_for(attribute, self._idx)
+        if component is None:
+            _LOGGER.error("[Climate] %s not available for %s", attribute, self.entity_id)
+            return
+
         _LOGGER.info(
-            "[Climate] Write target temperature: entity=%s, address=%s, "
-            "value(raw)=%s, value(temp)=%s",
+            "[Climate] Write target temperature: entity=%s, field=%s, value=%s",
             self.entity_id,
-            reg_addr,
-            raw_value,
+            field,
             temperature,
         )
         try:
-            await self.coordinator.async_write_registers(reg_addr, [raw_value])
+            # The field owns the address and the scale, so it writes the raw
+            # register the controller expects.
+            await component.write(field, temperature)
         except ModbusError as err:
             _LOGGER.error("Failed to write target temperature: %s", err)
             await self.coordinator.async_request_refresh()

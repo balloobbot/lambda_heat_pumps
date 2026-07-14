@@ -27,6 +27,9 @@ from .utils import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# The heating-circuit field this entity writes, on lambda_modbus' HeatingCircuit.
+FLOW_LINE_OFFSET_FIELD = "set_flow_line_offset_temperature"
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -376,89 +379,30 @@ class LambdaFlowLineOffsetNumber(CoordinatorEntity, RestoreNumber, NumberEntity)
             )
             return
 
-        # 2. Prüfe ob die Modbus-Verbindung steht
-        if not self.coordinator.unit:
+        # 2. Hole die Komponente des Heizkreises aus dem Gerätemodell
+        circuit = self.coordinator.component_for("heating_circuits", self._hc_index)
+        if circuit is None:
             _LOGGER.error(
-                "❌ FLOW_LINE_OFFSET: Modbus connection not available for %s",
-                self.entity_id,
-            )
-            return
-
-        # 3. Konvertiere zu Modbus-Format
-        raw_value = int(round(value / self._scale))  # z.B. 2.5°C -> 25
-        
-        # Konvertiere signed int16 zu unsigned für Modbus (Two's Complement)
-        # Das Register ist als int16 definiert, daher müssen
-        # negative Werte als Two's Complement kodiert werden
-        # Modbus-Register sind physisch unsigned (0-65535), aber das Gerät interpretiert
-        # sie als signed int16 (-32768 bis 32767)
-        from .utils import clamp_to_int16
-        
-        # Clamp auf int16-Bereich und konvertiere zu unsigned mit Two's Complement
-        raw_value = clamp_to_int16(raw_value, context="Flow Line Offset") & 0xFFFF
-        
-        _LOGGER.debug(
-            "🔄 FLOW_LINE_OFFSET: Converted %.1f°C to raw value %d (scale=%.1f, signed->unsigned)",
-            value,
-            raw_value,
-            self._scale,
-        )
-
-        # 4. Berechne Register-Adresse
-        # WICHTIG: base_addresses verwendet numerische Keys (1, 2, 3), nicht "hc1", "hc2"
-        # Siehe utils.py generate_base_addresses() und climate.py hc_addresses[idx]
-        if not hasattr(self.coordinator, "base_addresses") or not self.coordinator.base_addresses:
-            _LOGGER.error(
-                "❌ FLOW_LINE_OFFSET: Coordinator base_addresses not available for %s",
-                self.entity_id,
-            )
-            return
-
-        base_address = self.coordinator.base_addresses.get(self._hc_index)
-
-        if base_address is None:
-            _LOGGER.error(
-                "❌ FLOW_LINE_OFFSET: Base address not found for hc_index=%d (available keys: %s)",
+                "❌ FLOW_LINE_OFFSET: Heating circuit %d not available for %s",
                 self._hc_index,
-                list(self.coordinator.base_addresses.keys()),
+                self.entity_id,
             )
             return
 
-        register_address = base_address + self._relative_address
-        # z.B. HC1: 5000 + 50 = 5050, HC2: 5100 + 50 = 5150
-
-        # 5. Hole slave_id (konsistent mit climate.py)
-        slave_id = self._entry.data.get("slave_id", 1)
-
-        _LOGGER.info(
-            "✍️ FLOW_LINE_OFFSET: Writing to HC%d, base_address=%d, relative_address=%d, "
-            "register_address=%d, raw_value=%d (%.1f°C), slave_id=%d",
-            self._hc_index,
-            base_address,
-            self._relative_address,
-            register_address,
-            raw_value,
-            value,
-            slave_id,
-        )
-
-        # 6. Schreibe auf Modbus
+        # 3. Schreibe den Wert in °C. Das Feld kennt Adresse, Scale und Vorzeichen,
+        # rechnet also selbst in das Rohregister zurück.
         try:
-            await self.coordinator.async_write_registers(register_address, [raw_value])
-
+            await circuit.write(FLOW_LINE_OFFSET_FIELD, value)
             _LOGGER.info(
-                "✅ FLOW_LINE_OFFSET: Successfully wrote to HC%d (address=%d, value=%d, %.1f°C)",
-                self._hc_index,
-                register_address,
-                raw_value,
+                "✅ FLOW_LINE_OFFSET: Successfully wrote %.1f°C to HC%d",
                 value,
+                self._hc_index,
             )
-
         except Exception as ex:
             _LOGGER.error(
-                "❌ FLOW_LINE_OFFSET: Exception writing to HC%d (address=%d): %s",
+                "❌ FLOW_LINE_OFFSET: Exception writing %.1f°C to HC%d: %s",
+                value,
                 self._hc_index,
-                register_address,
                 ex,
                 exc_info=True,
             )
