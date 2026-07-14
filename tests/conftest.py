@@ -4,18 +4,14 @@ The mock implements the same `ModbusConnection` / `ModbusUnit` protocols the rea
 backends do, so the integration runs against it unchanged — the register model,
 the decoding and the entities are all exercised for real; only the wire is not.
 
-Two things are added on top of it, because they are properties of a *Lambda*
-rather than of Modbus:
-
-* the registers a controller reports, and
-* refusing the register block of a module that is not installed, which is the
-  only way a controller says it does not have one.
+All this adds is what makes the device a *Lambda*: the registers it reports, and
+which of its modules are installed.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, patch
 
 from modbus_connection import ModbusConnectionError, ModbusExceptionError
@@ -71,10 +67,10 @@ HOLDING: dict[int, int] = {
     5051: 210,  # target room temperature -> 21.0 °C
 }
 
-# The blocks a second module of each type would occupy. Nothing is installed
-# there, so the controller refuses to read them.
+# The first register of each module that is not installed. A read that reaches
+# one of these is refused, which is how the controller says the module is not
+# there — and how the probe counts the ones that are.
 ABSENT_BLOCKS = (1100, 2100, 3000, 4000, 5100)
-BLOCK_SIZE = 100
 ILLEGAL_DATA_ADDRESS = 2
 
 
@@ -87,22 +83,24 @@ class Controller:
     """
 
     registers: dict[int, int]
+    _units: list[MockModbusUnit] = field(default_factory=list)
+
+    def refuse(self, address: int) -> None:
+        """Stop answering for any block covering this register, as a pulled
+        module does."""
+        for unit in self._units:
+            unit.fail_read(address, ModbusExceptionError(ILLEGAL_DATA_ADDRESS))
 
 
 def _refuse_absent_modules(unit: MockModbusUnit) -> None:
-    """Make the unit answer for the modules it has, and no others."""
-    answer = unit.read_holding_registers
+    """Make the controller answer for the modules it has, and no others.
 
-    async def read_holding_registers(address: int, count: int) -> list[int]:
-        if any(
-            base <= address + offset < base + BLOCK_SIZE
-            for base in ABSENT_BLOCKS
-            for offset in range(count)
-        ):
-            raise ModbusExceptionError(ILLEGAL_DATA_ADDRESS)
-        return await answer(address, count)
-
-    unit.read_holding_registers = read_holding_registers
+    A block read that reaches into one of these refuses, exactly as a controller
+    does for a module that is not installed — which is the only way it ever says
+    so.
+    """
+    for base in ABSENT_BLOCKS:
+        unit.fail_read(base, ModbusExceptionError(ILLEGAL_DATA_ADDRESS))
 
 
 @pytest.fixture
@@ -113,15 +111,16 @@ def controller() -> Iterator[Controller]:
     as it would in life: the config flow closing the link it probed with does not
     stop setup from opening its own.
     """
-    registers = dict(HOLDING)
+    device = Controller(dict(HOLDING))
 
     def connect(host: str, *, port: int) -> MockModbusConnection:
         connection = MockModbusConnection()
         unit = connection.for_unit(SLAVE_ID)
         # The controller's memory, not this connection's — what is written over
         # one link is there to be read over the next.
-        unit.holding = registers
+        unit.holding = device.registers
         _refuse_absent_modules(unit)
+        device._units.append(unit)
         return connection
 
     connector: Callable[..., MockModbusConnection] = AsyncMock(side_effect=connect)
@@ -129,7 +128,7 @@ def controller() -> Iterator[Controller]:
         patch("custom_components.lambda_heat_pumps.connect_tcp", connector),
         patch("custom_components.lambda_heat_pumps.config_flow.connect_tcp", connector),
     ):
-        yield Controller(registers)
+        yield device
 
 
 @pytest.fixture

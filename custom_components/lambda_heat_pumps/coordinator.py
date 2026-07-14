@@ -31,7 +31,12 @@ from homeassistant.helpers.event import (
     async_track_time_interval,
 )
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from modbus_connection import ModbusConnection, ModbusError, ModbusUnit
+from modbus_connection import (
+    BlockReadError,
+    ModbusConnection,
+    ModbusError,
+    ModbusUnit,
+)
 
 from .const import (
     CONF_FAST_UPDATE_INTERVAL,
@@ -232,6 +237,15 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
         self._polling = True
         try:
             await self.device.async_update()
+        except BlockReadError as err:
+            # The controller refused a block it is modelled as having. That is
+            # what it says when a module is no longer there, so name the block —
+            # it is the difference between "it broke" and "you pulled a module".
+            raise UpdateFailed(
+                f"The controller refused {err.space} registers "
+                f"{err.address}-{err.address + err.count - 1}. If a module was "
+                f"added or removed, reload the integration to look again."
+            ) from err
         except ModbusError as err:
             raise UpdateFailed(f"Error reading the controller: {err}") from err
         finally:

@@ -143,3 +143,20 @@ async def test_unload_closes_the_connection(
 
     assert entry.state is ConfigEntryState.NOT_LOADED
     assert not connection.connected
+
+
+async def test_a_refused_block_says_which_one(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A module that stops answering names itself, rather than just failing."""
+    entry = await setup_entry(hass, controller)
+    coordinator = entry.runtime_data
+
+    # The heat pump is pulled out: it no longer answers for its registers.
+    controller.refuse(1004)
+    await coordinator.async_refresh()
+
+    assert not coordinator.last_update_success
+    message = str(coordinator.last_exception)
+    assert "holding registers 1000-1013" in message
+    assert "reload" in message
