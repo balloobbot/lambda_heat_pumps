@@ -32,7 +32,7 @@ from homeassistant.helpers.selector import (
 )
 from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
 from modbus_connection import ModbusError
-from modbus_connection.pymodbus import connect_tcp
+from modbus_connection.tmodbus import connect_tcp
 
 from .const import (
     CONF_COOLING_MODE,

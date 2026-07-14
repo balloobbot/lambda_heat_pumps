@@ -1,1 +1,1 @@
-modbus-connection[pymodbus]==3.7.0
+modbus-connection[tmodbus]==3.7.0

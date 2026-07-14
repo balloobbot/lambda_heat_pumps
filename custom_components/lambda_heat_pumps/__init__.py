@@ -18,7 +18,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry
 from modbus_connection import ModbusError
-from modbus_connection.pymodbus import connect_tcp
+from modbus_connection.tmodbus import connect_tcp
 
 from .const import (
     CONF_FIRMWARE_VERSION,
