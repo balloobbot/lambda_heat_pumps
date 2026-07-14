@@ -205,11 +205,7 @@ async def test_lambda_climate_entity_set_temperature():
     """Test set temperature method of LambdaClimateEntity."""
     coordinator_mock = MagicMock()
     coordinator_mock.data = {}
-    coordinator_mock.client = MagicMock()
-    # async_write_registers uses await client.write_registers, so it must be AsyncMock
-    coordinator_mock.client.write_registers = AsyncMock(
-        return_value=MagicMock(isError=lambda: False)
-    )
+    coordinator_mock.async_write_registers = AsyncMock()
     coordinator_mock.async_refresh = AsyncMock()
     coordinator_mock.async_request_refresh = AsyncMock()
 
@@ -241,21 +237,10 @@ async def test_lambda_climate_entity_set_temperature():
 
     # Mock async_write_ha_state um Home Assistant Konfiguration zu vermeiden
     with patch.object(entity, "async_write_ha_state"):
-        # Patch async_write_registers to verify it's called correctly
-        with patch("custom_components.lambda_heat_pumps.climate.async_write_registers") as mock_write:
-            mock_write.return_value = MagicMock(isError=lambda: False)
-            await entity.async_set_temperature(temperature=60)
+        await entity.async_set_temperature(temperature=60)
 
-            # Verify async_write_registers was called with correct parameters
-            mock_write.assert_called_once()
-            call_args = mock_write.call_args
-            # client (coordinator_mock.client)
-            assert call_args[0][0] == coordinator_mock.client
-            # base_address + relative_set_address (sollte 2050 sein für hot_water)
-            assert call_args[0][1] == 2050
-            # Temperatur * scale (10.0) - temperature 60 * scale 10 = 600
-            assert call_args[0][2] == [600]
-            assert call_args[0][3] == 1  # slave_id
+        # base_address + relative_set_address (2050 für hot_water), Wert mit Scale
+        coordinator_mock.async_write_registers.assert_awaited_once_with(2050, [600])
 
     # Überprüfe, ob der Coordinator-Cache aktualisiert wurde
     assert coordinator_mock.data["boil1_target_high_temperature"] == 60

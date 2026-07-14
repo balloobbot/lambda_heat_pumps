@@ -200,7 +200,7 @@ async def async_setup_entry(
                     await wait_for_stable_connection(coordinator)
                     _LOGGER.info("AUTO-DETECT: Connection stable, starting module detection...")
 
-                    detected = await auto_detect_modules(coordinator.client, coordinator.slave_id)
+                    detected = await auto_detect_modules(coordinator.unit, coordinator.slave_id)
                     updated = await update_entry_with_detected_modules(hass, entry, detected)
                     if updated:
                         _LOGGER.info("AUTO-DETECT: Background auto-detection updated module counts: %s (coordinator_id=%s)", detected, id(coordinator))
@@ -237,9 +237,9 @@ async def async_setup_entry(
         for attempt in range(AUTO_DETECT_RETRIES):
             try:
                 _LOGGER.info("AUTO-DETECT: Attempt %d/%d (coordinator_id=%s)", attempt + 1, AUTO_DETECT_RETRIES, id(coordinator))
-                if await coordinator.client.connect():
+                if coordinator.unit is not None:
                     _LOGGER.info("AUTO-DETECT: Connected, starting module detection (coordinator_id=%s)", id(coordinator))
-                    detected_counts = await auto_detect_modules(coordinator.client, coordinator.slave_id)
+                    detected_counts = await auto_detect_modules(coordinator.unit, coordinator.slave_id)
                     updated = await update_entry_with_detected_modules(hass, entry, detected_counts)
                     if updated:
                         _LOGGER.info("AUTO-DETECT: Config entry updated with detected module counts: %s (coordinator_id=%s)", detected_counts, id(coordinator))
@@ -382,21 +382,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Modbus-Client SOFORT schließen, noch vor der Task-Cancellation unten.
         # Grund: Die Task-Cancellation hat nur 2s Grace-Period; ein laufender
         # Modbus-Read kann aber bis zu LAMBDA_MODBUS_TIMEOUT (60s) pro Versuch
-        # dauern. Ist der Client hier schon geschlossen, schlägt jeder weitere
+        # dauern. Ist die Verbindung hier schon geschlossen, schlägt jeder weitere
         # Read-Versuch eines noch laufenden Hintergrund-Tasks (z.B. auto_detect_task
-        # oder ein in-flight Poll-Zyklus) sofort über die "not connected"-Prüfung
-        # in modbus_utils.py fehl, statt den globalen Modbus-Lock minutenlang für
-        # die neue Coordinator-Generation zu blockieren (siehe Fix für "Sensoren
+        # oder ein in-flight Poll-Zyklus) sofort fehl, statt die neue
+        # Coordinator-Generation minutenlang zu blockieren (siehe Fix für "Sensoren
         # ohne Werte nach Config-Änderung").
         coordinator = entry_data.get("coordinator")
-        if coordinator is not None and getattr(coordinator, "client", None) is not None:
-            try:
-                coordinator.client.close()
-                _LOGGER.debug("🧹 UNLOAD: Closed Modbus client early (coordinator_id=%s)", id(coordinator))
-            except Exception:
-                _LOGGER.debug("UNLOAD: Error closing Modbus client early", exc_info=True)
-            finally:
-                coordinator.client = None
+        if coordinator is not None:
+            await coordinator._close_connection()
+            _LOGGER.debug("UNLOAD: Closed Modbus connection early (coordinator_id=%s)", id(coordinator))
 
         # FIX K-01 + K-02: Hintergrund-Tasks abbrechen, BEVOR Platforms entladen werden.
         # Verhindert, dass verwaiste Tasks nach dem Reload async_add_entities erneut

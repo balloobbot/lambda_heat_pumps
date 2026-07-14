@@ -15,7 +15,7 @@
   "integration_type": "device",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/GuidoJeuken-6512/lambda_heat_pumps/issues",
-  "requirements": ["pymodbus>=3.6.0"],
+  "requirements": ["modbus-connection[pymodbus]>=0.1.0"],
 
   "version": "2.8.3"
 }

@@ -322,53 +322,6 @@ def test_config_cache_keys_cleared_on_setup():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 – 2d: async_read_input_registers hat Retry-Logik (M-09)
-# ---------------------------------------------------------------------------
-
-def test_async_read_input_registers_uses_lock_and_retry():
-    """2d: async_read_input_registers verwendet den globalen Modbus-Lock (lazy-init)."""
-    import inspect
-    from custom_components.lambda_heat_pumps.modbus_utils import (
-        async_read_input_registers,
-        _get_modbus_read_lock,
-    )
-    # Funktion existiert und ist eine Coroutine
-    assert asyncio.iscoroutinefunction(async_read_input_registers)
-    # Lock-Getter liefert einen Lock (lazy-init)
-    assert isinstance(_get_modbus_read_lock(), asyncio.Lock)
-    # Quellcode der Funktion referenziert den Lock-Getter
-    source = inspect.getsource(async_read_input_registers)
-    assert "_get_modbus_read_lock" in source
-    assert "LAMBDA_MAX_RETRIES" in source
-
-
-# ---------------------------------------------------------------------------
-# Health-Check-Lock vereinheitlicht (Race Condition PV-Surplus-Write-Kollision)
-# ---------------------------------------------------------------------------
-
-def test_connection_health_check_uses_shared_modbus_lock():
-    """_test_connection_health() muss denselben Lock wie Reads/Writes nutzen
-    (_get_modbus_read_lock), nicht mehr einen separaten Health-Check-Lock.
-
-    Vorher konnte ein Health-Check (vor jedem PV-Surplus-/Raumtemperatur-Write
-    via wait_for_stable_connection) parallel zu einem echten Coordinator-Read
-    oder -Write auf derselben Verbindung laufen, da zwei unabhaengige Locks
-    verwendet wurden - eine Race Condition, die Modbus-Transaktionen auf der
-    Leitung desynchronisieren und Schreibvorgaenge das Geraet nie erreichen
-    lassen konnte, obwohl das Log Erfolg meldete.
-    """
-    import inspect
-    import custom_components.lambda_heat_pumps.modbus_utils as modbus_utils
-
-    source = inspect.getsource(modbus_utils._test_connection_health)
-    assert "_get_modbus_read_lock" in source
-
-    # Der separate Health-Check-Lock darf nicht wiederkehren
-    assert not hasattr(modbus_utils, "_get_health_check_lock")
-    assert not hasattr(modbus_utils, "_health_check_lock")
-
-
-# ---------------------------------------------------------------------------
 # Phase 2 – 2e: cycling_sensor.py wurde gelöscht (M-05)
 # ---------------------------------------------------------------------------
 
@@ -475,18 +428,18 @@ async def test_skip_auto_detect_does_not_schedule_background_task():
 
 
 @pytest.mark.asyncio
-async def test_unload_closes_modbus_client_early():
-    """Modbus-Client wird beim Unload sofort geschlossen (vor der Task-Cancellation),
-    damit in-flight Modbus-Reads sofort fehlschlagen statt den globalen Lock zu
-    blockieren (siehe Root-Cause "Sensoren ohne Werte nach Config-Änderung")."""
+async def test_unload_closes_modbus_connection_early():
+    """Die Modbus-Verbindung wird beim Unload sofort geschlossen (vor der
+    Task-Cancellation), damit in-flight Reads sofort fehlschlagen statt die neue
+    Coordinator-Generation zu blockieren (siehe Root-Cause "Sensoren ohne Werte
+    nach Config-Änderung")."""
     from custom_components.lambda_heat_pumps import async_unload_entry
 
     entry = MagicMock()
     entry.entry_id = "test_close_client_early"
 
     mock_coordinator = MagicMock()
-    original_client = MagicMock()
-    mock_coordinator.client = original_client
+    mock_coordinator._close_connection = AsyncMock()
     mock_coordinator._persist_dirty = False
 
     hass = MagicMock()
@@ -508,8 +461,7 @@ async def test_unload_closes_modbus_client_early():
     ):
         await async_unload_entry(hass, entry)
 
-    original_client.close.assert_called_once()
-    assert mock_coordinator.client is None
+    mock_coordinator._close_connection.assert_awaited_once()
 
 
 if __name__ == "__main__":

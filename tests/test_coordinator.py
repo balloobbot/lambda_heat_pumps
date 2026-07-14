@@ -74,7 +74,9 @@ def test_coordinator_init(mock_hass, mock_entry):
     assert coordinator.port == 502
     assert coordinator.slave_id == 1
     assert coordinator.debug_mode is False
-    assert coordinator.client is None
+    assert coordinator.connection is None
+    assert coordinator.unit is None
+    assert coordinator.device is None
     assert coordinator.config_entry_id == "test_entry"
     assert coordinator.hass == mock_hass
     assert coordinator.entry == mock_entry
@@ -221,91 +223,53 @@ async def test_is_register_disabled_false(mock_hass, mock_entry):
     assert coordinator.is_register_disabled(4000) is False
 
 
-@pytest.mark.asyncio
-async def test_async_update_data_success(mock_hass, mock_entry):
-    """Test successful data update."""
-    mock_client = AsyncMock()
-    mock_result = Mock()
-    mock_result.isError.return_value = False
-    mock_result.registers = [100]
-    mock_client.read_holding_registers = AsyncMock(return_value=mock_result)
-
+@pytest.fixture
+def connected_coordinator(mock_hass, mock_entry, mock_modbus_connection):
+    """A coordinator wired to the in-memory mock controller."""
     coordinator = LambdaDataUpdateCoordinator(mock_hass, mock_entry)
-    coordinator.client = mock_client
+    coordinator.connection = mock_modbus_connection
+    coordinator.unit = mock_modbus_connection.for_unit(1)
     coordinator.disabled_registers = set()
-
-    result = await coordinator._async_update_data()
-
-    assert result is not None
-    mock_client.read_holding_registers.assert_called()
+    coordinator.sensor_overrides = {}
+    return coordinator
 
 
 @pytest.mark.asyncio
-async def test_async_update_data_no_client(mock_hass, mock_entry):
-    """Test data update when no client is available (Coordinator liefert weiterhin Data-Dict)."""
-    coordinator = LambdaDataUpdateCoordinator(mock_hass, mock_entry)
-    coordinator.client = None
+async def test_async_update_data_success(connected_coordinator, mock_modbus_unit):
+    """A general and a heat pump register decode into the flat data dict."""
+    mock_modbus_unit.holding[2] = 42  # ambient temperature, scale 0.1
+    mock_modbus_unit.holding[1004] = 3412  # HP1 flow line, scale 0.01
 
-    result = await coordinator._async_update_data()
+    result = await connected_coordinator._async_update_data()
 
-    # Coordinator gibt bei fehlendem Client ein Data-Dict zurück (kein None)
-    assert result is not None
-    assert isinstance(result, dict)
-
-
-@pytest.mark.asyncio
-async def test_async_update_data_disabled_register(mock_hass, mock_entry):
-    """Test data update with disabled register."""
-    mock_client = AsyncMock()
-    mock_result = Mock()
-    mock_result.isError.return_value = False
-    mock_result.registers = [100]
-    mock_client.read_holding_registers = AsyncMock(return_value=mock_result)
-
-    coordinator = LambdaDataUpdateCoordinator(mock_hass, mock_entry)
-    coordinator.client = mock_client
-    coordinator.disabled_registers = {1000}  # Disable register 1000
+    assert result["ambient_temperature"] == pytest.approx(4.2)
+    assert result["hp1_flow_line_temperature"] == pytest.approx(34.12)
 
 
 @pytest.mark.asyncio
-async def test_dynamic_batch_read_failure_handling(mock_hass, mock_entry):
-    """Test dynamic batch read failure handling."""
-    mock_client = AsyncMock()
-    
-    # Mock failed batch read
-    mock_failed_result = Mock()
-    mock_failed_result.isError.return_value = True
-    
-    # Mock successful individual read
-    mock_success_result = Mock()
-    mock_success_result.isError.return_value = False
-    mock_success_result.registers = [100]
-    
-    # First call fails, subsequent calls succeed
-    mock_client.read_holding_registers = AsyncMock(side_effect=[
-        mock_failed_result,  # First batch read fails
-        mock_success_result,  # Individual read succeeds
-        mock_success_result,  # Individual read succeeds
-        mock_success_result,  # Individual read succeeds
-        mock_success_result,  # Individual read succeeds
-    ])
+async def test_async_update_data_no_connection(mock_hass, mock_entry):
+    """An unreachable controller fails the update, so entities go unavailable."""
+    from homeassistant.helpers.update_coordinator import UpdateFailed
 
     coordinator = LambdaDataUpdateCoordinator(mock_hass, mock_entry)
-    coordinator.client = mock_client
-    
-    # Test that batch failures are tracked
-    assert len(coordinator._batch_failures) == 0
-    assert len(coordinator._individual_read_addresses) == 0
-    
-    # Simulate batch read failure
-    batch_key = (1050, 11)  # Register 1050-1060
-    coordinator._batch_failures[batch_key] = 1
-    
-    # After max failures, should switch to individual reads
-    coordinator._batch_failures[batch_key] = coordinator._max_batch_failures + 1
-    coordinator._individual_read_addresses.add(batch_key)
-    
-    assert batch_key in coordinator._individual_read_addresses
+    coordinator.disabled_registers = set()
+    coordinator.sensor_overrides = {}
+
+    with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
+
+
+@pytest.mark.asyncio
+async def test_async_update_data_disabled_register(
+    connected_coordinator, mock_modbus_unit
+):
+    """A disabled register is kept out of the data, even though it is read."""
+    mock_modbus_unit.holding[2] = 42  # ambient temperature
+    connected_coordinator.disabled_registers = {2}
+
+    result = await connected_coordinator._async_update_data()
+
+    assert "ambient_temperature" not in result
 
 
 @pytest.mark.asyncio
@@ -332,137 +296,74 @@ async def test_dynamic_cycling_warnings(mock_hass, mock_entry):
 
 
 @pytest.mark.asyncio
-async def test_async_update_data_read_error(mock_hass, mock_entry):
-    """Test data update with read error (Coordinator liefert weiterhin Data-Dict)."""
-    mock_client = AsyncMock()
-    mock_result = Mock()
-    mock_result.isError.return_value = True
-    mock_client.read_holding_registers = AsyncMock(return_value=mock_result)
+async def test_async_update_data_read_error(connected_coordinator, mock_modbus_unit):
+    """A controller that refuses a read fails the update."""
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+    from modbus_connection import ModbusExceptionError
 
-    coordinator = LambdaDataUpdateCoordinator(mock_hass, mock_entry)
-    coordinator.client = mock_client
-    coordinator.disabled_registers = set()
+    def refuse():
+        raise ModbusExceptionError(2)  # illegal data address
 
-    result = await coordinator._async_update_data()
+    mock_modbus_unit.holding[0] = refuse
 
-    # Coordinator gibt bei Read-Fehler ein Data-Dict zurück (kein None)
-    assert result is not None
-    assert isinstance(result, dict)
+    with pytest.raises(UpdateFailed):
+        await connected_coordinator._async_update_data()
 
 
 @pytest.mark.asyncio
-async def test_async_update_data_int32_sensor(mock_hass, mock_entry):
-    """Test data update with int32 sensor."""
-    mock_client = AsyncMock()
-    mock_result = Mock()
-    mock_result.isError.return_value = False
-    mock_result.registers = [100, 200]  # Two registers for int32
-    mock_client.read_holding_registers = AsyncMock(return_value=mock_result)
+async def test_async_update_data_int32_sensor(connected_coordinator, mock_modbus_unit):
+    """A 32-bit counter decodes across its two registers."""
+    mock_modbus_unit.holding[1020] = [0x0001, 0x86A0]
 
-    coordinator = LambdaDataUpdateCoordinator(mock_hass, mock_entry)
-    coordinator.client = mock_client
-    coordinator.disabled_registers = set()
+    result = await connected_coordinator._async_update_data()
 
-    result = await coordinator._async_update_data()
-
-    assert result is not None
-    mock_client.read_holding_registers.assert_called()
+    assert result["hp1_compressor_power_consumption_accumulated"] == 100000
 
 
 @pytest.mark.asyncio
-async def test_async_update_data_int16_sensor(mock_hass, mock_entry):
-    """Test data update with int16 sensor."""
-    mock_client = AsyncMock()
-    mock_result = Mock()
-    mock_result.isError.return_value = False
-    mock_result.registers = [100]  # One register for int16
-    mock_client.read_holding_registers = AsyncMock(return_value=mock_result)
+async def test_async_update_data_int16_sensor(connected_coordinator, mock_modbus_unit):
+    """A negative int16 decodes signed, not as 65 thousand."""
+    mock_modbus_unit.holding[2] = 0xFFF6  # -10 raw, scale 0.1
 
-    coordinator = LambdaDataUpdateCoordinator(mock_hass, mock_entry)
-    coordinator.client = mock_client
-    coordinator.disabled_registers = set()
+    result = await connected_coordinator._async_update_data()
 
-    result = await coordinator._async_update_data()
-
-    assert result is not None
-    mock_client.read_holding_registers.assert_called()
+    assert result["ambient_temperature"] == pytest.approx(-1.0)
 
 
 @pytest.mark.asyncio
-async def test_async_update_data_sentinel_value_filtered(mock_hass, mock_entry):
-    """A raw register value of 0x8000 (Lambda sentinel) must not be scaled into
-    a bogus reading - the affected int16 sensors must come back as None."""
-    mock_client = AsyncMock()
-    mock_result = Mock()
-    mock_result.isError.return_value = False
-    mock_result.registers = [32768]  # 0x8000 - "register not available"
-    mock_client.read_holding_registers = AsyncMock(return_value=mock_result)
-
+async def test_connect_success(mock_hass, mock_entry, mock_modbus_connection):
+    """Connecting takes a unit handle on the link."""
     coordinator = LambdaDataUpdateCoordinator(mock_hass, mock_entry)
-    coordinator.client = mock_client
-    coordinator.disabled_registers = set()
 
-    result = await coordinator._async_update_data()
-
-    assert result is not None
-    int16_values = [
-        v for k, v in result.items()
-        if isinstance(v, (int, float)) and v == 32768
-    ]
-    assert int16_values == []
-
-
-@pytest.mark.asyncio
-async def test_async_update_data_opt_in_sentinel_ambient_temperature(mock_hass, mock_entry):
-    """ambient_temperature opts in to 65535 (0xFFFF/-1) as a sentinel via
-    sentinel_values=[65535] in its template, unlike other int16 sensors where
-    -1 stays a valid reading (see is_sentinel_value extra_sentinels)."""
-    mock_client = AsyncMock()
-    mock_result = Mock()
-    mock_result.isError.return_value = False
-    mock_result.registers = [65535]
-    mock_client.read_holding_registers = AsyncMock(return_value=mock_result)
-
-    coordinator = LambdaDataUpdateCoordinator(mock_hass, mock_entry)
-    coordinator.client = mock_client
-    coordinator.disabled_registers = set()
-
-    result = await coordinator._async_update_data()
-
-    assert result is not None
-    assert result.get("ambient_temperature") is None
-    assert SENSOR_TYPES["ambient_temperature"]["sentinel_values"] == [65535]
-
-
-@pytest.mark.asyncio
-async def test_connect_success(mock_hass, mock_entry):
-    """Test successful connection."""
-    mock_client = AsyncMock()
-    mock_client.connect = AsyncMock(return_value=True)
-
-    with patch("pymodbus.client.AsyncModbusTcpClient", return_value=mock_client):
-        coordinator = LambdaDataUpdateCoordinator(mock_hass, mock_entry)
+    with patch(
+        "custom_components.lambda_heat_pumps.coordinator.connect_tcp",
+        AsyncMock(return_value=mock_modbus_connection),
+    ) as connect:
         await coordinator._connect()
 
-        assert coordinator.client == mock_client
-        mock_client.connect.assert_called_once()
+    connect.assert_awaited_once_with("192.168.1.100", port=502)
+    assert coordinator.connection is mock_modbus_connection
+    assert coordinator.unit is not None
 
 
 @pytest.mark.asyncio
 async def test_connect_failure(mock_hass, mock_entry):
-    """Test connection failure."""
+    """A link that will not open fails setup, and nothing is left half-built."""
     from homeassistant.helpers.update_coordinator import UpdateFailed
-    
-    mock_client = AsyncMock()
-    mock_client.connect = AsyncMock(return_value=False)
+    from modbus_connection import ModbusConnectionError
 
-    with patch("pymodbus.client.AsyncModbusTcpClient", return_value=mock_client):
-        coordinator = LambdaDataUpdateCoordinator(mock_hass, mock_entry)
-        
+    coordinator = LambdaDataUpdateCoordinator(mock_hass, mock_entry)
+
+    with patch(
+        "custom_components.lambda_heat_pumps.coordinator.connect_tcp",
+        AsyncMock(side_effect=ModbusConnectionError("no route")),
+    ):
         with pytest.raises(UpdateFailed):
             await coordinator._connect()
-        
-        assert coordinator.client is None
+
+    assert coordinator.connection is None
+    assert coordinator.unit is None
+    assert coordinator.device is None
 
 
 @pytest.mark.asyncio

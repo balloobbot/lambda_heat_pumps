@@ -17,7 +17,8 @@ from .const import (
     DEFAULT_WRITE_INTERVAL,
     CONF_PV_POWER_SENSOR_ENTITY,
 )
-from .modbus_utils import async_read_holding_registers, async_write_registers, wait_for_stable_connection
+from modbus_connection import ModbusError
+from .modbus_utils import wait_for_stable_connection
 
 # Konstanten für Zustandsarten definieren
 STATE_UNAVAILABLE = "unavailable"
@@ -144,9 +145,9 @@ async def _process_room_temperature_entry(
 
     # Hole Coordinator für gemeinsame Nutzung
     coordinator = entry_data.get("coordinator")
-    if not coordinator or not coordinator.client:
+    if not coordinator or not coordinator.unit:
         _LOGGER.error(
-            "Coordinator or Modbus client not available for entry_id %s",
+            "Coordinator or Modbus connection not available for entry_id %s",
             entry_id,
         )
         return
@@ -227,17 +228,12 @@ async def _update_heating_circuit_temperature(
             entry_id,
         )
 
-        result = await async_write_registers(
-            coordinator.client,
-            register_address,
-            [raw_value],
-            entry_data.get("slave_id", 1),
-        )
-
-        if result.isError():
+        try:
+            await coordinator.async_write_registers(register_address, [raw_value])
+        except ModbusError as err:
             _LOGGER.info(
-                "❌ MODBUS WRITE FAILED: Room temperature write failed, address=%d, value=%d, hc=%d, result=%s, caller=_write_room_temperatures",
-                register_address, raw_value, hc_idx, result
+                "❌ MODBUS WRITE FAILED: Room temperature write failed, address=%d, value=%d, hc=%d, error=%s, caller=_write_room_temperatures",
+                register_address, raw_value, hc_idx, err
             )
         else:
             _LOGGER.info(
@@ -273,27 +269,20 @@ async def _handle_read_modbus_register(hass: HomeAssistant, call: ServiceCall) -
 
     for entry_id, entry_data in lambda_entries.items():
         coordinator = entry_data.get("coordinator")
-        if not coordinator or not coordinator.client:
+        if not coordinator or not coordinator.unit:
             _LOGGER.error(
-                "Coordinator or Modbus client not available for entry_id %s",
+                "Coordinator or Modbus connection not available for entry_id %s",
                 entry_id,
             )
             continue
 
         try:
-            result = await async_read_holding_registers(
-                coordinator.client,
-                register_address,
-                1,
-            )
-            if result.isError():
-                _LOGGER.error(
-                    "Failed to read Modbus register: %s",
-                    result,
-                )
-                return {"error": str(result)}
+            try:
+                value = (await coordinator.async_read_registers(register_address))[0]
+            except ModbusError as err:
+                _LOGGER.error("Failed to read Modbus register: %s", err)
+                return {"error": str(err)}
             else:
-                value = result.registers[0]
                 _LOGGER.info(
                     "Read Modbus register %s: %s",
                     register_address,
@@ -327,25 +316,18 @@ async def _handle_write_modbus_register(hass: HomeAssistant, call: ServiceCall) 
 
     for entry_id, entry_data in lambda_entries.items():
         coordinator = entry_data.get("coordinator")
-        if not coordinator or not coordinator.client:
+        if not coordinator or not coordinator.unit:
             _LOGGER.error(
-                "Coordinator or Modbus client not available for entry_id %s",
+                "Coordinator or Modbus connection not available for entry_id %s",
                 entry_id,
             )
             continue
 
         try:
-            result = await async_write_registers(
-                coordinator.client,
-                register_address,
-                [value],
-                entry_data.get("slave_id", 1),
-            )
-            if result.isError():
-                _LOGGER.error(
-                    "Failed to write Modbus register: %s",
-                    result,
-                )
+            try:
+                await coordinator.async_write_registers(register_address, [value])
+            except ModbusError as err:
+                _LOGGER.error("Failed to write Modbus register: %s", err)
             else:
                 _LOGGER.info(
                     "Wrote Modbus register %s with value %s",
@@ -389,9 +371,9 @@ async def _write_room_and_pv_for_entry(
         return
 
     coordinator = entry_data.get("coordinator")
-    if not coordinator or not coordinator.client:
+    if not coordinator or not coordinator.unit:
         _LOGGER.error(
-            "Coordinator or Modbus client not available for entry_id %s",
+            "Coordinator or Modbus connection not available for entry_id %s",
             entry_id,
         )
         return
@@ -452,12 +434,7 @@ async def _write_room_temperatures(
                 temperature,
                 hc_idx,
             )
-            await async_write_registers(
-                coordinator.client,
-                register_address,
-                [raw_value],
-                entry_data.get("slave_id", 1),
-            )
+            await coordinator.async_write_registers(register_address, [raw_value])
         except Exception as ex:
             _LOGGER.error(
                 "Error writing room temperature for HC %d: %s",
@@ -515,17 +492,12 @@ async def _write_pv_surplus(
         await wait_for_stable_connection(coordinator)
         _LOGGER.info("SERVICE: Connection stable, proceeding with PV surplus write")
 
-        result = await async_write_registers(
-            coordinator.client,
-            102,  # register_address for PV surplus
-            [raw_value],
-            entry_data.get("slave_id", 1),
-        )
-        
-        if result.isError():
+        try:
+            await coordinator.async_write_registers(102, [raw_value])
+        except ModbusError as err:
             _LOGGER.info(
-                "❌ MODBUS WRITE FAILED: PV surplus write failed, address=102, value=%d, result=%s, caller=_write_pv_surplus",
-                raw_value, result
+                "❌ MODBUS WRITE FAILED: PV surplus write failed, address=102, value=%d, error=%s, caller=_write_pv_surplus",
+                raw_value, err
             )
         else:
             _LOGGER.info(

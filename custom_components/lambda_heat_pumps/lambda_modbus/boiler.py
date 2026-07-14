@@ -1,0 +1,20 @@
+"""A domestic hot water boiler (BOIL1-n)."""
+
+from __future__ import annotations
+
+from modbus_connection.model import gauge, integer
+
+from .model import LambdaComponent
+
+
+class Boiler(LambdaComponent):
+    """One boiler. Addresses are relative; the block sits at 2000 + 100n."""
+
+    error_number = integer(0)
+    operating_state = integer(1, signed=False)
+    actual_high_temperature = gauge(2, 0.1, unit="°C")
+    actual_low_temperature = gauge(3, 0.1, unit="°C")
+    actual_circulation_temperature = gauge(4, 0.1, unit="°C")
+    actual_circulation_pump_state = integer(5)
+
+    target_high_temperature = gauge(50, 0.1, writable=True, unit="°C")

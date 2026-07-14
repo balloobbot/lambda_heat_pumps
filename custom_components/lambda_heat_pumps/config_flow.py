@@ -16,6 +16,7 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
+from modbus_connection.pymodbus import connect_tcp
 
 from .const import (
     DOMAIN,
@@ -51,47 +52,23 @@ from .const import (
     DEFAULT_PV_SURPLUS_MODE,
 )
 from .const_migration import MIGRATION_VERSION
-from .modbus_utils import async_read_holding_registers
 
 _LOGGER = logging.getLogger(__name__)
 
 
 async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> None:
     """Validate the user input allows us to connect."""
+    connection = None
     try:
-        from pymodbus.client import AsyncModbusTcpClient
-
-        # Use only basic parameters that are supported across all pymodbus versions
-        client = AsyncModbusTcpClient(
-            host=data[CONF_HOST], port=data[CONF_PORT], timeout=5
-        )
-
-        if not await client.connect():
-            raise CannotConnectError("Could not connect to Modbus TCP")
-
-        # Test read using the same proven approach as modbus_utils.py
-        slave_id = data[CONF_SLAVE_ID]
-
-        # Use the modbus_utils function which has proven compatibility
-        result = await async_read_holding_registers(client, 0, 1, slave_id)
-
-        if hasattr(result, "isError") and result.isError():
-            raise CannotConnectError("Failed to read from device")
-
+        connection = await connect_tcp(data[CONF_HOST], port=data[CONF_PORT])
+        # Register 0 is the general error number — every controller answers it.
+        await connection.for_unit(data[CONF_SLAVE_ID]).read_holding_registers(0, 1)
     except Exception as ex:
         _LOGGER.error("Connection test failed: %s", ex)
         raise CannotConnectError("Failed to connect to device") from ex
     finally:
-        try:
-            if "client" in locals() and client is not None:
-                # Try async close first, fallback to sync
-                try:
-                    if hasattr(client, "close") and callable(client.close):
-                        client.close()
-                except Exception:
-                    pass
-        except Exception as close_ex:
-            _LOGGER.debug("Error closing client: %s", close_ex)
+        if connection is not None:
+            await connection.close()
 
 
 class LambdaConfigFlow(ConfigFlow, domain=DOMAIN):

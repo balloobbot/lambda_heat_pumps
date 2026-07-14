@@ -33,7 +33,7 @@ from .utils import (
     get_entity_icon,
     normalize_name_prefix,
 )
-from .modbus_utils import async_write_registers
+from modbus_connection import ModbusError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -167,14 +167,10 @@ class LambdaClimateEntity(CoordinatorEntity, ClimateEntity):
             raw_value,
             temperature,
         )
-        result = await async_write_registers(
-            self.coordinator.client,
-            reg_addr,
-            [raw_value],
-            self._entry.data.get("slave_id", 1),
-        )
-        if result is None or (hasattr(result, "isError") and result.isError()):
-            _LOGGER.error("Failed to write target temperature: %s", result)
+        try:
+            await self.coordinator.async_write_registers(reg_addr, [raw_value])
+        except ModbusError as err:
+            _LOGGER.error("Failed to write target temperature: %s", err)
             await self.coordinator.async_request_refresh()
             return
         self.coordinator.data[self._target_temperature_key] = temperature

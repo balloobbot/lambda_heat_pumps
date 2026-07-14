@@ -405,22 +405,21 @@ async def test_validate_input_success(mock_hass):
         CONF_FIRMWARE_VERSION: "V0.0.3-3K",
     }
 
-    # Mock the AsyncModbusTcpClient
-    mock_client = AsyncMock()
-    mock_client.connect.return_value = True
-    mock_client.close.return_value = None
-    
-    # Mock the read_holding_registers result
-    mock_result = Mock()
-    mock_result.isError.return_value = False
+    connection = AsyncMock()
+    connection.for_unit = Mock(return_value=AsyncMock())
 
-    with patch("pymodbus.client.AsyncModbusTcpClient", return_value=mock_client):
-        with patch("custom_components.lambda_heat_pumps.config_flow.async_read_holding_registers", return_value=mock_result):
-            result = await validate_input(mock_hass, user_input)
+    with patch(
+        "custom_components.lambda_heat_pumps.config_flow.connect_tcp",
+        AsyncMock(return_value=connection),
+    ) as connect:
+        result = await validate_input(mock_hass, user_input)
 
-            assert result is None  # validate_input returns None on success
-            mock_client.connect.assert_called_once()
-            mock_client.close.assert_called_once()
+    assert result is None  # validate_input returns None on success
+    connect.assert_awaited_once_with("192.168.1.100", port=502)
+    # Register 0 is read as a liveness check, and the link is always closed again.
+    connection.for_unit.assert_called_once_with(1)
+    connection.for_unit.return_value.read_holding_registers.assert_awaited_once_with(0, 1)
+    connection.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -432,10 +431,12 @@ async def test_validate_input_connection_failed(mock_hass):
         CONF_SLAVE_ID: 1,
     }
 
-    mock_client = AsyncMock()
-    mock_client.connect.return_value = False
+    from modbus_connection import ModbusConnectionError
 
-    with patch("pymodbus.client.ModbusTcpClient", return_value=mock_client):
+    with patch(
+        "custom_components.lambda_heat_pumps.config_flow.connect_tcp",
+        AsyncMock(side_effect=ModbusConnectionError("no route")),
+    ):
         with pytest.raises(CannotConnectError):
             await validate_input(mock_hass, user_input)
 

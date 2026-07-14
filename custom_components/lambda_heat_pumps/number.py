@@ -376,10 +376,10 @@ class LambdaFlowLineOffsetNumber(CoordinatorEntity, RestoreNumber, NumberEntity)
             )
             return
 
-        # 2. Prüfe ob Coordinator-Client verfügbar ist
-        if not self.coordinator.client:
+        # 2. Prüfe ob die Modbus-Verbindung steht
+        if not self.coordinator.unit:
             _LOGGER.error(
-                "❌ FLOW_LINE_OFFSET: Modbus client not available for %s",
+                "❌ FLOW_LINE_OFFSET: Modbus connection not available for %s",
                 self.entity_id,
             )
             return
@@ -443,24 +443,8 @@ class LambdaFlowLineOffsetNumber(CoordinatorEntity, RestoreNumber, NumberEntity)
         )
 
         # 6. Schreibe auf Modbus
-        from .modbus_utils import async_write_registers
-
         try:
-            result = await async_write_registers(
-                self.coordinator.client,
-                register_address,
-                [raw_value],
-                slave_id,
-            )
-
-            if hasattr(result, "isError") and result.isError():
-                _LOGGER.error(
-                    "❌ FLOW_LINE_OFFSET: Failed to write to HC%d (address=%d): %s",
-                    self._hc_index,
-                    register_address,
-                    result,
-                )
-                return
+            await self.coordinator.async_write_registers(register_address, [raw_value])
 
             _LOGGER.info(
                 "✅ FLOW_LINE_OFFSET: Successfully wrote to HC%d (address=%d, value=%d, %.1f°C)",

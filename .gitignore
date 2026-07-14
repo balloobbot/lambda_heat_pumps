@@ -9,11 +9,16 @@
 !custom_components/lambda_heat_pumps/**/*.json
 !custom_components/lambda_heat_pumps/translations/
 !custom_components/lambda_heat_pumps/translations/**/*.json
+!custom_components/lambda_heat_pumps/lambda_modbus/
 
 # Tests im Root nicht ignorieren
 !tests/
 !tests/**
 tests/playwright/
+
+# Hilfsskripte (script/query.py)
+!script/
+!script/**
 
 # And not these files
 !.gitignore
