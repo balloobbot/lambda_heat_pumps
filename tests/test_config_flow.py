@@ -22,12 +22,12 @@ from custom_components.lambda_heat_pumps.const import (
     REGISTER_ORDER_LOW_FIRST,
 )
 
-from .conftest import SLAVE_ID, LambdaServer
+from .conftest import HOST, PORT, SLAVE_ID, Controller
 
-pytestmark = pytest.mark.usefixtures("enable_custom_integrations", "socket_enabled")
+pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
 
-async def test_adding_a_controller(hass: HomeAssistant, server: LambdaServer) -> None:
+async def test_adding_a_controller(hass: HomeAssistant, controller: Controller) -> None:
     """The user is asked how to reach it, and nothing about its modules."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_USER}
@@ -41,8 +41,8 @@ async def test_adding_a_controller(hass: HomeAssistant, server: LambdaServer) ->
         result["flow_id"],
         {
             CONF_NAME: "EU08L",
-            CONF_HOST: server.host,
-            CONF_PORT: server.port,
+            CONF_HOST: HOST,
+            CONF_PORT: PORT,
             CONF_SLAVE_ID: SLAVE_ID,
             CONF_FIRMWARE_VERSION: "V1.1.0-3K",
         },
@@ -59,6 +59,7 @@ async def test_adding_a_controller(hass: HomeAssistant, server: LambdaServer) ->
     assert entry.runtime_data.counts["hp"] == 1
 
 
+@pytest.mark.usefixtures("unreachable")
 async def test_a_controller_that_is_not_there(hass: HomeAssistant) -> None:
     """Nothing is created for an address that does not answer."""
     result = await hass.config_entries.flow.async_init(
@@ -68,9 +69,9 @@ async def test_a_controller_that_is_not_there(hass: HomeAssistant) -> None:
         result["flow_id"],
         {
             CONF_NAME: "EU08L",
-            CONF_HOST: "127.0.0.1",
-            CONF_PORT: 1,  # nothing listens here
-            CONF_SLAVE_ID: 1,
+            CONF_HOST: HOST,
+            CONF_PORT: PORT,
+            CONF_SLAVE_ID: SLAVE_ID,
             CONF_FIRMWARE_VERSION: "V1.1.0-3K",
         },
     )
@@ -90,7 +91,7 @@ def old_config_file(hass: HomeAssistant):
 
 
 async def test_an_older_entry_is_brought_forward(
-    hass: HomeAssistant, server: LambdaServer, old_config_file
+    hass: HomeAssistant, controller: Controller, old_config_file
 ) -> None:
     """The one real setting in the old config file moves onto the entry."""
     entry = MockConfigEntry(
@@ -98,8 +99,8 @@ async def test_an_older_entry_is_brought_forward(
         version=8,
         data={
             CONF_NAME: "EU08L",
-            CONF_HOST: server.host,
-            CONF_PORT: server.port,
+            CONF_HOST: HOST,
+            CONF_PORT: PORT,
             CONF_SLAVE_ID: SLAVE_ID,
             # The module counts used to be config; they are probed now.
             "num_hps": 3,
@@ -125,7 +126,7 @@ async def test_an_older_entry_is_brought_forward(
 
 
 async def test_an_older_entry_without_the_config_file(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """A user who never had the file gets the default the file would have had."""
     entry = MockConfigEntry(
@@ -133,8 +134,8 @@ async def test_an_older_entry_without_the_config_file(
         version=8,
         data={
             CONF_NAME: "EU08L",
-            CONF_HOST: server.host,
-            CONF_PORT: server.port,
+            CONF_HOST: HOST,
+            CONF_PORT: PORT,
             CONF_SLAVE_ID: SLAVE_ID,
             CONF_FIRMWARE_VERSION: "V0.0.8-3K",
         },

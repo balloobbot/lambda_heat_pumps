@@ -1,25 +1,34 @@
-"""Fixtures for the integration tests: a Modbus TCP server that acts as a Lambda.
+"""A Lambda controller, backed by modbus-connection's in-memory mock backend.
 
-The tests talk to it over a real socket, so nothing about the Modbus layer is
-mocked: a passing test means the register model, the connection and the entities
-all agree with each other.
+The mock implements the same `ModbusConnection` / `ModbusUnit` protocols the real
+backends do, so the integration runs against it unchanged — the register model,
+the decoding and the entities are all exercised for real; only the wire is not.
 
-The server is written out here rather than taken from a library because what the
-tests need from it is precisely the thing a library server makes hard — refusing
-the register blocks of a module that is not installed, which is how a Lambda
-controller says it does not have one.
+Two things are added on top of it, because they are properties of a *Lambda*
+rather than of Modbus:
+
+* the registers a controller reports, and
+* refusing the register block of a module that is not installed, which is the
+  only way a controller says it does not have one.
 """
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncIterator
-import socket
-import struct
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from unittest.mock import AsyncMock, patch
 
+from modbus_connection import ModbusConnectionError, ModbusExceptionError
+from modbus_connection.mock import MockModbusConnection, MockModbusUnit
 import pytest
 
 SLAVE_ID = 1
+
+# Where the controller is. Nothing dials it — the mock backend stands in for the
+# wire — but the config entry has to say something, and the integration hands
+# these to `connect_tcp`.
+HOST = "192.168.1.50"
+PORT = 502
 
 # One heat pump, one boiler, one heating circuit.
 HOLDING: dict[int, int] = {
@@ -65,103 +74,75 @@ HOLDING: dict[int, int] = {
 # The blocks a second module of each type would occupy. Nothing is installed
 # there, so the controller refuses to read them.
 ABSENT_BLOCKS = (1100, 2100, 3000, 4000, 5100)
-
-READ_HOLDING = 3
-WRITE_REGISTER = 6
-WRITE_REGISTERS = 16
+BLOCK_SIZE = 100
 ILLEGAL_DATA_ADDRESS = 2
 
 
-class LambdaServer:
-    """A Modbus TCP server that answers as a Lambda controller would."""
+@dataclass
+class Controller:
+    """The device under test.
 
-    def __init__(self) -> None:
-        """Start from the registers a real controller would be reporting."""
-        self.registers = dict(HOLDING)
-        self.host = "127.0.0.1"
-        self.port = _free_port()
-        self._server: asyncio.Server | None = None
-        self._clients: set[asyncio.StreamWriter] = set()
+    `registers` is the controller's memory — seed it before setup, read it back
+    after a write, change it mid-test to make the controller do something.
+    """
 
-    def _absent(self, address: int, count: int) -> bool:
-        """Whether the block covers a module the controller does not have."""
-        return any(
-            base <= address + offset < base + 100
+    registers: dict[int, int]
+
+
+def _refuse_absent_modules(unit: MockModbusUnit) -> None:
+    """Make the unit answer for the modules it has, and no others."""
+    answer = unit.read_holding_registers
+
+    async def read_holding_registers(address: int, count: int) -> list[int]:
+        if any(
+            base <= address + offset < base + BLOCK_SIZE
             for base in ABSENT_BLOCKS
             for offset in range(count)
-        )
+        ):
+            raise ModbusExceptionError(ILLEGAL_DATA_ADDRESS)
+        return await answer(address, count)
 
-    async def start(self) -> None:
-        """Listen."""
-        self._server = await asyncio.start_server(self._handle, self.host, self.port)
-
-    async def stop(self) -> None:
-        """Stop listening, and hang up on anyone still connected.
-
-        A connection has to be closed from this end too: waiting for the server
-        to close waits for its handlers, and a handler runs until its client goes
-        away.
-        """
-        for writer in list(self._clients):
-            writer.close()
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-
-    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        self._clients.add(writer)
-        try:
-            while True:
-                header = await reader.readexactly(8)
-                transaction, _, _, unit, function = struct.unpack(">HHHBB", header)
-                body = await self._respond(function, reader)
-                payload = bytes([unit]) + body
-                writer.write(struct.pack(">HHH", transaction, 0, len(payload)) + payload)
-                await writer.drain()
-        except (asyncio.IncompleteReadError, ConnectionError):
-            pass
-        finally:
-            self._clients.discard(writer)
-            writer.close()
-
-    async def _respond(self, function: int, reader: asyncio.StreamReader) -> bytes:
-        """The body of the response to one request."""
-        if function == READ_HOLDING:
-            address, count = struct.unpack(">HH", await reader.readexactly(4))
-            if self._absent(address, count):
-                return struct.pack(">BB", function | 0x80, ILLEGAL_DATA_ADDRESS)
-            values = [self.registers.get(address + i, 0) for i in range(count)]
-            return struct.pack(">BB", function, count * 2) + b"".join(
-                struct.pack(">H", value) for value in values
-            )
-
-        if function == WRITE_REGISTER:
-            address, value = struct.unpack(">HH", await reader.readexactly(4))
-            self.registers[address] = value
-            return struct.pack(">BHH", function, address, value)
-
-        if function == WRITE_REGISTERS:
-            address, count, _ = struct.unpack(">HHB", await reader.readexactly(5))
-            data = await reader.readexactly(count * 2)
-            for i in range(count):
-                self.registers[address + i] = struct.unpack(">H", data[i * 2 : i * 2 + 2])[0]
-            return struct.pack(">BHH", function, address, count)
-
-        return struct.pack(">BB", function | 0x80, 1)  # illegal function
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+    unit.read_holding_registers = read_holding_registers
 
 
 @pytest.fixture
-async def server(socket_enabled) -> AsyncIterator[LambdaServer]:
-    """A Lambda controller on a real socket."""
-    controller = LambdaServer()
-    await controller.start()
-    try:
-        yield controller
-    finally:
-        await controller.stop()
+def controller() -> Iterator[Controller]:
+    """A Lambda controller, reached over the mock backend.
+
+    Every call to `connect_tcp` opens a fresh connection to the same controller,
+    as it would in life: the config flow closing the link it probed with does not
+    stop setup from opening its own.
+    """
+    registers = dict(HOLDING)
+
+    def connect(host: str, *, port: int) -> MockModbusConnection:
+        connection = MockModbusConnection()
+        unit = connection.for_unit(SLAVE_ID)
+        # The controller's memory, not this connection's — what is written over
+        # one link is there to be read over the next.
+        unit.holding = registers
+        _refuse_absent_modules(unit)
+        return connection
+
+    connector: Callable[..., MockModbusConnection] = AsyncMock(side_effect=connect)
+    with (
+        patch("custom_components.lambda_heat_pumps.connect_tcp", connector),
+        patch("custom_components.lambda_heat_pumps.config_flow.connect_tcp", connector),
+    ):
+        yield Controller(registers)
+
+
+@pytest.fixture
+def unreachable() -> Iterator[None]:
+    """A controller that does not answer."""
+    with (
+        patch(
+            "custom_components.lambda_heat_pumps.config_flow.connect_tcp",
+            AsyncMock(side_effect=ModbusConnectionError("no route to host")),
+        ),
+        patch(
+            "custom_components.lambda_heat_pumps.connect_tcp",
+            AsyncMock(side_effect=ModbusConnectionError("no route to host")),
+        ),
+    ):
+        yield

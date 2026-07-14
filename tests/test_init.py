@@ -17,21 +17,18 @@ from custom_components.lambda_heat_pumps.const import (
     ENTRY_VERSION,
 )
 
-from .conftest import SLAVE_ID, LambdaServer
+from .conftest import HOST, PORT, SLAVE_ID, Controller
 
 
-@pytest.fixture(autouse=True)
-def _custom_integrations(enable_custom_integrations, socket_enabled):
-    """Let Home Assistant load the integration, and the server bind a socket."""
-    return
+pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
 
-def entry_data(server: LambdaServer, *, legacy: bool = False) -> dict:
-    """A config entry pointing at the test server."""
+def entry_data(*, legacy: bool = False) -> dict:
+    """A config entry for the controller the `controller` fixture stands up."""
     return {
         CONF_NAME: "EU08L",
-        CONF_HOST: server.host,
-        CONF_PORT: server.port,
+        CONF_HOST: HOST,
+        CONF_PORT: PORT,
         CONF_SLAVE_ID: SLAVE_ID,
         CONF_FIRMWARE_VERSION: "V0.0.8-3K",
         CONF_USE_LEGACY_MODBUS_NAMES: legacy,
@@ -39,13 +36,13 @@ def entry_data(server: LambdaServer, *, legacy: bool = False) -> dict:
 
 
 async def setup_entry(
-    hass: HomeAssistant, server: LambdaServer, *, legacy: bool = False, options=None
+    hass: HomeAssistant, controller: Controller, *, legacy: bool = False, options=None
 ) -> MockConfigEntry:
-    """Set up a controller against the test server."""
+    """Set up the controller."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         version=ENTRY_VERSION,
-        data=entry_data(server, legacy=legacy),
+        data=entry_data(legacy=legacy),
         options=options or {},
     )
     entry.add_to_hass(hass)
@@ -55,10 +52,10 @@ async def setup_entry(
 
 
 async def test_setup_detects_the_modules_the_controller_has(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """The probe finds one of each installed module, and none of the rest."""
-    entry = await setup_entry(hass, server)
+    entry = await setup_entry(hass, controller)
 
     assert entry.state is ConfigEntryState.LOADED
     assert entry.runtime_data.counts == {"hp": 1, "boil": 1, "buff": 0, "sol": 0, "hc": 1}
@@ -72,10 +69,10 @@ def state_of(hass: HomeAssistant, unique_id: str) -> str:
 
 
 async def test_setup_reads_the_controller(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """Values come back decoded — scaled, signed, and state codes resolved."""
-    await setup_entry(hass, server, legacy=True)
+    await setup_entry(hass, controller, legacy=True)
 
     assert state_of(hass, "eu08l_ambient_temperature") == "4.2"
     assert state_of(hass, "eu08l_hp1_flow_line_temperature") == "34.12"
@@ -89,10 +86,10 @@ async def test_setup_reads_the_controller(
 
 
 async def test_unique_ids_are_unchanged(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """An existing installation's entities keep the ids they have always had."""
-    entry = await setup_entry(hass, server, legacy=True)
+    entry = await setup_entry(hass, controller, legacy=True)
     registry = er.async_get(hass)
 
     for unique_id in (
@@ -116,29 +113,29 @@ async def test_unique_ids_are_unchanged(
 
 
 async def test_modules_are_their_own_devices(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """Each module hangs off the controller as its own device."""
-    entry = await setup_entry(hass, server)
+    entry = await setup_entry(hass, controller)
     devices = dr.async_get(hass)
 
-    controller = devices.async_get_device(identifiers={(DOMAIN, entry.entry_id)})
-    assert controller is not None
-    assert controller.name == "EU08L"
+    main = devices.async_get_device(identifiers={(DOMAIN, entry.entry_id)})
+    assert main is not None
+    assert main.name == "EU08L"
 
     heat_pump = devices.async_get_device(
         identifiers={(DOMAIN, entry.entry_id, "hp", 1)}
     )
     assert heat_pump is not None
     assert heat_pump.name == "EU08L - HP1"
-    assert heat_pump.via_device_id == controller.id
+    assert heat_pump.via_device_id == main.id
 
 
 async def test_unload_closes_the_connection(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """The integration owns the link, so it lets go of it."""
-    entry = await setup_entry(hass, server)
+    entry = await setup_entry(hass, controller)
     connection = entry.runtime_data.connection
 
     assert await hass.config_entries.async_unload(entry.entry_id)

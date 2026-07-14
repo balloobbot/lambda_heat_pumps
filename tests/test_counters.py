@@ -24,10 +24,10 @@ from custom_components.lambda_heat_pumps.const import (
 )
 from custom_components.lambda_heat_pumps.coordinator import _periods_ending
 
-from .conftest import LambdaServer
+from .conftest import Controller
 from .test_init import setup_entry, state_of
 
-pytestmark = pytest.mark.usefixtures("enable_custom_integrations", "socket_enabled")
+pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
 
 async def _poll(hass: HomeAssistant, seconds: int) -> None:
@@ -82,35 +82,35 @@ def test_which_periods_end_when(moment: str, expected: set[str]) -> None:
 
 
 async def test_a_mode_change_counts_a_cycle(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """Entering a mode counts one cycle; staying in it counts no more."""
-    await setup_entry(hass, server, legacy=True)
+    await setup_entry(hass, controller, legacy=True)
     assert state_of(hass, "eu08l_hp1_hot_water_cycling_total") == "0"
 
-    server.registers[1003] = 2  # the heat pump switches to hot water
+    controller.registers[1003] = 2  # the heat pump switches to hot water
     await _poll(hass, 3)
     assert state_of(hass, "eu08l_hp1_hot_water_cycling_total") == "1"
 
     await _poll(hass, 6)  # still in hot water
     assert state_of(hass, "eu08l_hp1_hot_water_cycling_total") == "1"
 
-    server.registers[1003] = 1  # back to heating...
+    controller.registers[1003] = 1  # back to heating...
     await _poll(hass, 9)
-    server.registers[1003] = 2  # ...and into hot water again
+    controller.registers[1003] = 2  # ...and into hot water again
     await _poll(hass, 12)
     assert state_of(hass, "eu08l_hp1_hot_water_cycling_total") == "2"
 
 
 async def test_a_compressor_start_counts_a_cycle(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """The compressor beginning to run is a start, whatever the mode."""
-    server.registers[1010] = 0  # the compressor is not running
-    await setup_entry(hass, server, legacy=True)
+    controller.registers[1010] = 0  # the compressor is not running
+    await setup_entry(hass, controller, legacy=True)
     assert state_of(hass, "eu08l_hp1_compressor_start_cycling_total") == "0"
 
-    server.registers[1010] = 4200
+    controller.registers[1010] = 4200
     await _poll(hass, 3)
     assert state_of(hass, "eu08l_hp1_compressor_start_cycling_total") == "1"
 
@@ -119,15 +119,15 @@ async def test_a_compressor_start_counts_a_cycle(
 
 
 async def test_energy_is_booked_against_the_current_mode(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """What the controller's counter climbed by is charged to the mode it is in."""
-    entry = await setup_entry(hass, server, legacy=True)
+    entry = await setup_entry(hass, controller, legacy=True)
 
     # The heat pump is heating. Its electrical counter climbs by 2000 Wh and its
     # thermal one by 8000 Wh.
-    server.registers[1021] = 0x86A0 + 2000
-    server.registers[1023] = 0x1A80 + 8000
+    controller.registers[1021] = 0x86A0 + 2000
+    controller.registers[1023] = 0x1A80 + 8000
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
 
@@ -140,17 +140,17 @@ async def test_energy_is_booked_against_the_current_mode(
 
 
 async def test_the_first_reading_is_not_counted(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """The controller's counter is already high; only what it climbs by counts."""
-    await setup_entry(hass, server, legacy=True)
+    await setup_entry(hass, controller, legacy=True)
 
     # 100 kWh were on the electrical counter before Home Assistant ever saw it.
     assert state_of(hass, "eu08l_hp1_heating_energy_total") == "0.0"
 
 
 async def test_a_counter_survives_a_restart(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """A counter picks its own value back up, and keeps counting from there."""
     # The entity id Home Assistant gives it, from the device and the sensor's name.
@@ -163,22 +163,22 @@ async def test_a_counter_survives_a_restart(
             ),
         ),
     )
-    await setup_entry(hass, server, legacy=True)
+    await setup_entry(hass, controller, legacy=True)
     assert state_of(hass, "eu08l_hp1_heating_cycling_total") == "7"
 
-    server.registers[1003] = 2  # leave heating...
+    controller.registers[1003] = 2  # leave heating...
     await _poll(hass, 3)
-    server.registers[1003] = 1  # ...and come back to it
+    controller.registers[1003] = 1  # ...and come back to it
     await _poll(hass, 6)
 
     assert state_of(hass, "eu08l_hp1_heating_cycling_total") == "8"
 
 
-async def test_a_day_ends(hass: HomeAssistant, server: LambdaServer) -> None:
+async def test_a_day_ends(hass: HomeAssistant, controller: Controller) -> None:
     """The daily counter starts again, and yesterday keeps the day that ended."""
-    entry = await setup_entry(hass, server, legacy=True)
+    entry = await setup_entry(hass, controller, legacy=True)
 
-    server.registers[1003] = 2
+    controller.registers[1003] = 2
     await _poll(hass, 3)
     assert state_of(hass, "eu08l_hp1_hot_water_cycling_daily") == "1"
     assert state_of(hass, "eu08l_hp1_hot_water_cycling_yesterday") == "0"
@@ -193,12 +193,12 @@ async def test_a_day_ends(hass: HomeAssistant, server: LambdaServer) -> None:
 
 
 async def test_a_period_that_ends_does_not_end_the_others(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """An hour ending leaves the day's counter alone."""
-    entry = await setup_entry(hass, server, legacy=True)
+    entry = await setup_entry(hass, controller, legacy=True)
 
-    server.registers[1021] = 0x86A0 + 3000
+    controller.registers[1021] = 0x86A0 + 3000
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
     assert state_of(hass, "eu08l_hp1_heating_energy_hourly") == "3.0"
@@ -211,7 +211,7 @@ async def test_a_period_that_ends_does_not_end_the_others(
     assert state_of(hass, "eu08l_hp1_heating_energy_daily") == "3.0"
 
     # And what it counts after the hour ended starts from there.
-    server.registers[1021] = 0x86A0 + 4000
+    controller.registers[1021] = 0x86A0 + 4000
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
     assert state_of(hass, "eu08l_hp1_heating_energy_hourly") == "1.0"

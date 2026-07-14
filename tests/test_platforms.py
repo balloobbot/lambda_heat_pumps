@@ -22,10 +22,10 @@ from custom_components.lambda_heat_pumps.const import (
     DOMAIN,
 )
 
-from .conftest import LambdaServer
+from .conftest import Controller
 from .test_init import setup_entry, state_of
 
-pytestmark = pytest.mark.usefixtures("enable_custom_integrations", "socket_enabled")
+pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
 
 def entity_id(hass: HomeAssistant, platform: str, unique_id: str) -> str:
@@ -36,10 +36,10 @@ def entity_id(hass: HomeAssistant, platform: str, unique_id: str) -> str:
 
 
 async def test_the_heating_curve_is_read_off_the_points(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """The flow temperature is interpolated from the curve at today's weather."""
-    await setup_entry(hass, server, legacy=True)
+    await setup_entry(hass, controller, legacy=True)
 
     # It is 3.8 °C outside. The curve runs 48.3 °C at -22, 39.0 at 0, 32.0 at +22,
     # so between 0 and +22 the flow falls by 7 °C over 22 — at 3.8 that is
@@ -48,10 +48,10 @@ async def test_the_heating_curve_is_read_off_the_points(
 
 
 async def test_moving_a_curve_point_moves_the_curve(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """The number entities are what the curve is drawn through."""
-    await setup_entry(hass, server, legacy=True)
+    await setup_entry(hass, controller, legacy=True)
     number = entity_id(
         hass, NUMBER_DOMAIN, "eu08l_hc1_heating_curve_mid_outside_temp_number"
     )
@@ -70,10 +70,10 @@ async def test_moving_a_curve_point_moves_the_curve(
 
 
 async def test_the_curve_follows_the_flow_line_offset(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """The offset is a register: writing it moves the curve, and the controller."""
-    await setup_entry(hass, server, legacy=True)
+    await setup_entry(hass, controller, legacy=True)
     number = entity_id(
         hass, NUMBER_DOMAIN, "eu08l_hc1_flow_line_offset_temperature_number"
     )
@@ -87,18 +87,18 @@ async def test_the_curve_follows_the_flow_line_offset(
     await hass.async_block_till_done()
 
     # The controller now holds it, scaled by 0.1 as the register wants.
-    assert server.registers[5050] == 25
+    assert controller.registers[5050] == 25
     assert hass.states.get(number).state == "2.5"
     # And the curve carries it: 37.79 + 2.5.
     assert state_of(hass, "eu08l_hc1_heating_curve_flow_line_temperature_calc") == "40.3"
 
 
 async def test_a_room_thermostat_pushes_the_curve(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """A room below its setpoint asks the circuit for a hotter flow."""
     await setup_entry(
-        hass, server, legacy=True, options={CONF_ROOM_THERMOSTAT_CONTROL: True}
+        hass, controller, legacy=True, options={CONF_ROOM_THERMOSTAT_CONTROL: True}
     )
 
     # The room is at 21.5 °C and wants 21.0 — it is half a degree too warm, so
@@ -107,10 +107,10 @@ async def test_a_room_thermostat_pushes_the_curve(
 
 
 async def test_setting_the_hot_water_temperature(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """The boiler's thermostat writes the register the controller aims at."""
-    await setup_entry(hass, server, legacy=True)
+    await setup_entry(hass, controller, legacy=True)
     climate = entity_id(hass, CLIMATE_DOMAIN, "eu08l_boil1_hot_water")
 
     assert hass.states.get(climate).attributes[ATTR_CURRENT_TEMPERATURE] == 48.0
@@ -123,15 +123,15 @@ async def test_setting_the_hot_water_temperature(
     )
     await hass.async_block_till_done()
 
-    assert server.registers[2050] == 550
+    assert controller.registers[2050] == 550
     assert hass.states.get(climate).attributes["temperature"] == 55.0
 
 
 async def test_a_circuit_only_becomes_a_thermostat_when_it_has_a_room(
-    hass: HomeAssistant, server: LambdaServer
+    hass: HomeAssistant, controller: Controller
 ) -> None:
     """Without a room sensor there is nothing for a heating-circuit climate to do."""
-    await setup_entry(hass, server, legacy=True)
+    await setup_entry(hass, controller, legacy=True)
     registry = er.async_get(hass)
 
     assert registry.async_get_entity_id(CLIMATE_DOMAIN, DOMAIN, "eu08l_boil1_hot_water")
