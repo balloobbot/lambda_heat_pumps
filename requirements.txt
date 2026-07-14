@@ -1,3 +1,1 @@
 modbus-connection[pymodbus]
-packaging>=26.0
-openpyxl==3.1.5
