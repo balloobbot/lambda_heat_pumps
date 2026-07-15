@@ -351,6 +351,11 @@ def _cycle_description(mode: str, period: str) -> CounterDescription:
             if period == PERIOD_TOTAL
             else SensorStateClass.TOTAL
         ),
+        # Only the running total is on by default; the per-period counters are
+        # derivable from it (the energy dashboard and utility_meter do exactly
+        # that), so they are left for the user to enable rather than shipped as
+        # a dozen entities per heat pump.
+        entity_registry_enabled_default=period == PERIOD_TOTAL,
         suggested_display_precision=0,
         total=lambda coordinator, index, mode=mode: coordinator.totals[index].cycles.get(
             mode, 0
@@ -371,6 +376,8 @@ def _energy_description(mode: str, period: str, *, thermal: bool) -> CounterDesc
             if period == PERIOD_TOTAL
             else SensorStateClass.TOTAL
         ),
+        # The total feeds the energy dashboard, which derives the periods itself.
+        entity_registry_enabled_default=period == PERIOD_TOTAL,
         suggested_display_precision=2,
         decimals=2,
         total=(
@@ -607,6 +614,8 @@ class YesterdayCycleSensor(LambdaEntity, RestoreSensor):
     _attr_native_unit_of_measurement = _CYCLE_UNIT
     _attr_state_class = SensorStateClass.TOTAL
     _attr_suggested_display_precision = 0
+    # A per-day figure, so off by default like the other per-period counters.
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator: LambdaCoordinator, mode: str, index: int) -> None:
         """Name the mode this mirrors."""
@@ -658,6 +667,9 @@ class LambdaCopSensor(LambdaEntity, SensorEntity):
         key = f"{mode}_cop_{period}"
         super().__init__(coordinator, key, "hp", index)
         self._attr_translation_key = key
+        # The lifetime coefficient is on by default; the per-period ones follow
+        # the counters they divide, which are off by default.
+        self._attr_entity_registry_enabled_default = period == PERIOD_TOTAL
         self._thermal = thermal
         self._electrical = electrical
 

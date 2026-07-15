@@ -68,6 +68,23 @@ def state_of(hass: HomeAssistant, unique_id: str) -> str:
     return hass.states.get(entity_id).state
 
 
+async def enable_sensors(
+    hass: HomeAssistant, entry: MockConfigEntry, *unique_ids: str
+) -> None:
+    """Turn on entities that ship disabled, as a user would, and reload.
+
+    The per-period counters are off by default; a test that reads one has to
+    enable it first, then reload so it comes up with a state.
+    """
+    registry = er.async_get(hass)
+    for unique_id in unique_ids:
+        entity_id = registry.async_get_entity_id("sensor", DOMAIN, unique_id)
+        assert entity_id, f"no entity for {unique_id}"
+        registry.async_update_entity(entity_id, disabled_by=None)
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
 async def test_setup_reads_the_controller(
     hass: HomeAssistant, controller: Controller
 ) -> None:
@@ -160,3 +177,37 @@ async def test_a_refused_block_says_which_one(
     message = str(coordinator.last_exception)
     assert "holding registers 1000-1013" in message
     assert "reload" in message
+
+
+async def test_only_the_totals_are_enabled_by_default(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A fresh install ships the running totals; the per-period counters are off."""
+    await setup_entry(hass, controller, legacy=True)
+    registry = er.async_get(hass)
+
+    def enabled(unique_id: str) -> bool:
+        entity_id = registry.async_get_entity_id("sensor", DOMAIN, unique_id)
+        assert entity_id, unique_id
+        return not registry.async_get(entity_id).disabled
+
+    # The totals a user actually builds on — and feeds to the energy dashboard.
+    assert enabled("eu08l_hp1_heating_cycling_total")
+    assert enabled("eu08l_hp1_heating_energy_total")
+    assert enabled("eu08l_hp1_heating_thermal_energy_total")
+    assert enabled("eu08l_hp1_heating_cop_total")
+    # The device's own lifetime register counters stay on too.
+    assert enabled("eu08l_hp1_compressor_power_consumption_accumulated")
+
+    # Everything reported over a period is created but disabled.
+    for unique_id in (
+        "eu08l_hp1_heating_cycling_daily",
+        "eu08l_hp1_heating_cycling_2h",
+        "eu08l_hp1_heating_cycling_yesterday",
+        "eu08l_hp1_compressor_start_cycling_monthly",
+        "eu08l_hp1_heating_energy_daily",
+        "eu08l_hp1_heating_energy_hourly",
+        "eu08l_hp1_heating_thermal_energy_yearly",
+        "eu08l_hp1_heating_cop_daily",
+    ):
+        assert not enabled(unique_id), unique_id

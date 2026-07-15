@@ -25,7 +25,7 @@ from custom_components.lambda_heat_pumps.const import (
 from custom_components.lambda_heat_pumps.coordinator import _periods_ending
 
 from .conftest import Controller
-from .test_init import setup_entry, state_of
+from .test_init import enable_sensors, setup_entry, state_of
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -177,6 +177,12 @@ async def test_a_counter_survives_a_restart(
 async def test_a_day_ends(hass: HomeAssistant, controller: Controller) -> None:
     """The daily counter starts again, and yesterday keeps the day that ended."""
     entry = await setup_entry(hass, controller, legacy=True)
+    await enable_sensors(
+        hass,
+        entry,
+        "eu08l_hp1_hot_water_cycling_daily",
+        "eu08l_hp1_hot_water_cycling_yesterday",
+    )
 
     controller.registers[1003] = 2
     await _poll(hass, 3)
@@ -197,6 +203,12 @@ async def test_a_period_that_ends_does_not_end_the_others(
 ) -> None:
     """An hour ending leaves the day's counter alone."""
     entry = await setup_entry(hass, controller, legacy=True)
+    await enable_sensors(
+        hass,
+        entry,
+        "eu08l_hp1_heating_energy_hourly",
+        "eu08l_hp1_heating_energy_daily",
+    )
 
     controller.registers[1021] = 0x86A0 + 3000
     await entry.runtime_data.async_refresh()
