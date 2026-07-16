@@ -5,10 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from homeassistant.config_entries import SOURCE_USER, ConfigEntryState
+from homeassistant.config_entries import SOURCE_DHCP, SOURCE_USER, ConfigEntryState
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.lambda_heat_pumps.const import (
@@ -100,8 +101,9 @@ async def test_an_older_entry_is_brought_forward(
         data={
             CONF_NAME: "EU08L",
             CONF_HOST: HOST,
-            CONF_PORT: PORT,
-            CONF_SLAVE_ID: SLAVE_ID,
+            # The old number selector stored these as floats.
+            CONF_PORT: float(PORT),
+            CONF_SLAVE_ID: float(SLAVE_ID),
             # The module counts used to be config; they are probed now.
             "num_hps": 3,
             "num_boil": 2,
@@ -116,6 +118,9 @@ async def test_an_older_entry_is_brought_forward(
     assert entry.version == ENTRY_VERSION
     # The counts the user once typed in are gone; what the controller says wins.
     assert "num_hps" not in entry.data
+    # The port and unit id are normalised to ints the Modbus frame can pack.
+    assert type(entry.data[CONF_PORT]) is int
+    assert type(entry.data[CONF_SLAVE_ID]) is int
     assert entry.runtime_data.counts == {"hp": 1, "boil": 1, "buff": 0, "sol": 0, "hc": 1}
     # An entry from before this keeps its entities' names.
     assert entry.data[CONF_USE_LEGACY_MODBUS_NAMES] is True
@@ -145,3 +150,37 @@ async def test_an_older_entry_without_the_config_file(
     await hass.async_block_till_done()
 
     assert entry.options[CONF_INT32_REGISTER_ORDER] == DEFAULT_INT32_REGISTER_ORDER
+
+
+async def test_dhcp_does_not_reoffer_a_configured_controller(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A controller that is already set up is not offered again as new.
+
+    Its entry predates discovery, so it has no MAC to match on; the address it
+    was set up with is what stops the re-offer.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=ENTRY_VERSION,
+        data={
+            CONF_NAME: "EU08L",
+            CONF_HOST: HOST,
+            CONF_PORT: PORT,
+            CONF_SLAVE_ID: SLAVE_ID,
+            CONF_FIRMWARE_VERSION: "V0.0.8-3K",
+            CONF_USE_LEGACY_MODBUS_NAMES: True,
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_DHCP},
+        data=DhcpServiceInfo(ip=HOST, hostname="lambda", macaddress="0050f4aabbcc"),
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"

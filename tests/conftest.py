@@ -83,6 +83,9 @@ class Controller:
     """
 
     registers: dict[int, int]
+    # What the integration handed the backend, for asserting it passed ints.
+    ports: list = field(default_factory=list)
+    unit_ids: list = field(default_factory=list)
     _units: list[MockModbusUnit] = field(default_factory=list)
 
     def refuse(self, address: int) -> None:
@@ -114,13 +117,22 @@ def controller() -> Iterator[Controller]:
     device = Controller(dict(HOLDING))
 
     def connect(host: str, *, port: int) -> MockModbusConnection:
+        device.ports.append(port)
         connection = MockModbusConnection()
-        unit = connection.for_unit(SLAVE_ID)
-        # The controller's memory, not this connection's — what is written over
-        # one link is there to be read over the next.
-        unit.holding = device.registers
-        _refuse_absent_modules(unit)
-        device._units.append(unit)
+        base_for_unit = connection.for_unit
+
+        def for_unit(unit_id: int) -> MockModbusUnit:
+            device.unit_ids.append(unit_id)
+            unit = base_for_unit(unit_id)
+            # The controller's memory, not this connection's — what is written
+            # over one link is there to be read over the next.
+            unit.holding = device.registers
+            _refuse_absent_modules(unit)
+            if unit not in device._units:
+                device._units.append(unit)
+            return unit
+
+        connection.for_unit = for_unit
         return connection
 
     connector: Callable[..., MockModbusConnection] = AsyncMock(side_effect=connect)

@@ -211,3 +211,33 @@ async def test_only_the_totals_are_enabled_by_default(
         "eu08l_hp1_heating_cop_daily",
     ):
         assert not enabled(unique_id), unique_id
+
+
+async def test_a_float_unit_id_is_coerced_to_int(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """An entry storing the port and unit id as floats still connects.
+
+    The number selector that set them hands back floats, and older entries kept
+    them; the Modbus frame needs ints, so the backend must be handed ints.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=ENTRY_VERSION,  # already migrated, so migration does not re-run
+        data={
+            CONF_NAME: "EU08L",
+            CONF_HOST: HOST,
+            CONF_PORT: 502.0,
+            CONF_SLAVE_ID: 1.0,
+            CONF_FIRMWARE_VERSION: "V0.0.8-3K",
+            CONF_USE_LEGACY_MODBUS_NAMES: True,
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    # Never a float — that is what tmodbus's struct.pack rejects.
+    assert controller.ports and all(type(p) is int for p in controller.ports)
+    assert controller.unit_ids and all(type(u) is int for u in controller.unit_ids)

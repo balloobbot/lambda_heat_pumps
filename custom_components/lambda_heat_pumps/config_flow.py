@@ -134,6 +134,10 @@ class LambdaConfigFlow(ConfigFlow, domain=DOMAIN):
         """A controller announced itself on the network."""
         await self.async_set_unique_id(discovery_info.macaddress)
         self._abort_if_unique_id_configured(updates={CONF_HOST: discovery_info.ip})
+        # An entry created before discovery set the unique id has no MAC to match
+        # on, so fall back to the address — otherwise a controller that is already
+        # set up keeps being offered as a new one.
+        self._async_abort_entries_match({CONF_HOST: discovery_info.ip})
         self._discovered_host = discovery_info.ip
         return await self.async_step_user()
 

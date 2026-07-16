@@ -44,17 +44,27 @@ PLATFORMS = [Platform.CLIMATE, Platform.NUMBER, Platform.SENSOR]
 
 async def async_setup_entry(hass: HomeAssistant, entry: LambdaConfigEntry) -> bool:
     """Set up a Lambda controller from a config entry."""
+    # The port and unit id are read straight into a Modbus frame, which needs
+    # ints; the number selector that set them hands back floats, and older
+    # entries were stored that way.
+    port = int(entry.data[CONF_PORT])
+    slave_id = int(entry.data[CONF_SLAVE_ID])
     try:
-        connection = await connect_tcp(entry.data[CONF_HOST], port=entry.data[CONF_PORT])
+        connection = await connect_tcp(entry.data[CONF_HOST], port=port)
     except ModbusError as err:
         raise ConfigEntryNotReady(f"Could not connect to the controller: {err}") from err
 
-    unit = connection.for_unit(entry.data[CONF_SLAVE_ID])
+    unit = connection.for_unit(slave_id)
     try:
         counts = await async_detect_modules(unit)
     except ModbusError as err:
         await connection.close()
         raise ConfigEntryNotReady(f"Could not probe the controller: {err}") from err
+    except Exception:
+        # Anything else would leak the open connection, and setup retries — so it
+        # would leak one per attempt.
+        await connection.close()
+        raise
 
     # From here the coordinator owns the connection: it closes it on unload, and
     # Home Assistant unloads the entry even when this first refresh fails.
@@ -113,6 +123,10 @@ async def async_migrate_entry(hass: HomeAssistant, entry: LambdaConfigEntry) -> 
     # The module counts are probed on every setup now.
     for key in ("num_hps", "num_boil", "num_buff", "num_sol", "num_hc"):
         data.pop(key, None)
+
+    # The number selector stored these as floats; the Modbus frame needs ints.
+    data[CONF_PORT] = int(data[CONF_PORT])
+    data[CONF_SLAVE_ID] = int(data[CONF_SLAVE_ID])
 
     # Entries that predate this were all named with the prefix.
     data.setdefault(CONF_USE_LEGACY_MODBUS_NAMES, True)
