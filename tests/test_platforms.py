@@ -127,6 +127,35 @@ async def test_setting_the_hot_water_temperature(
     assert hass.states.get(climate).attributes["temperature"] == 55.0
 
 
+async def test_the_hot_water_climate_keeps_its_controls_when_part_is_refused(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """The boiler refuses its circulation registers; the thermostat still works.
+
+    This is the reported symptom: a controller that answers the boiler's
+    temperatures but refuses the registers after them left the hot-water card
+    showing only "Heat", with no current or target temperature. The probe keeps
+    the served registers, so the climate reads both again.
+    """
+    controller.refuse(2004)  # actual_circulation_temperature
+    controller.refuse(2005)  # actual_circulation_pump_state
+    await setup_entry(hass, controller, legacy=True)
+    climate = entity_id(hass, CLIMATE_DOMAIN, "eu08l_boil1_hot_water")
+
+    state = hass.states.get(climate)
+    assert state.attributes[ATTR_CURRENT_TEMPERATURE] == 48.0
+    assert state.attributes["temperature"] == 52.0
+
+    await hass.services.async_call(
+        CLIMATE_DOMAIN,
+        SERVICE_SET_TEMPERATURE,
+        {ATTR_ENTITY_ID: climate, ATTR_TEMPERATURE: 55.0},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert controller.registers[2050] == 550
+
+
 async def test_a_circuit_only_becomes_a_thermostat_when_it_has_a_room(
     hass: HomeAssistant, controller: Controller
 ) -> None:

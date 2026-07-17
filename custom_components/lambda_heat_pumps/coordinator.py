@@ -208,7 +208,12 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
         )
 
     async def _async_setup(self) -> None:
-        """Arm the fast poll and the period rollovers."""
+        """Probe the register map, then arm the fast poll and period rollovers."""
+        # Which registers the controller serves depends on its firmware, so the
+        # modules are built from what it answers for — probed once here, before
+        # the first poll reads them.
+        await self.device.async_setup()
+
         entry = self.config_entry
         entry.async_on_unload(
             async_track_time_interval(

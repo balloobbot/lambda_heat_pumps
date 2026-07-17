@@ -13,7 +13,7 @@ from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
-from modbus_connection import ModbusError
+from modbus_connection import ModbusExceptionError
 
 from .const import CONF_HOST
 from .coordinator import LambdaConfigEntry
@@ -53,17 +53,31 @@ async def async_get_config_entry_diagnostics(
 async def _async_read_registers(coordinator) -> dict[str, Any]:
     """The controller's raw holding registers, address -> value.
 
-    Reads only the blocks the controller answers for — the same ranges the model
-    polls — so the dump never provokes a refusal, and covers exactly the
-    registers a Lambda serves.
+    Reads the ranges the model polls; a range the controller refuses (a firmware
+    that does not serve every register a module could have) is retried one
+    register at a time, so the dump shows exactly the registers this controller
+    serves rather than stopping at the first it does not.
     """
     registers: dict[int, int] = {}
     for low, high in readable_ranges(coordinator.counts):
         try:
             values = await coordinator.unit.read_holding_registers(low, high - low + 1)
-        except ModbusError as err:
-            return {"error": str(err), "read_so_far": registers}
-        registers.update(zip(range(low, high + 1), values, strict=True))
+        except ModbusExceptionError:
+            await _read_by_register(coordinator, low, high, registers)
+        else:
+            registers.update(zip(range(low, high + 1), values, strict=True))
     # JSON object keys are strings; keep them numeric-looking and sorted so the
     # dump reads like an address map.
     return {str(address): registers[address] for address in sorted(registers)}
+
+
+async def _read_by_register(
+    coordinator, low: int, high: int, registers: dict[int, int]
+) -> None:
+    """Read a refused range a register at a time, keeping the served ones."""
+    for address in range(low, high + 1):
+        try:
+            (value,) = await coordinator.unit.read_holding_registers(address, 1)
+        except ModbusExceptionError:
+            continue  # a register this controller does not serve
+        registers[address] = value

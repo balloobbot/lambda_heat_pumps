@@ -179,6 +179,55 @@ async def test_a_refused_block_says_which_one(
     assert "reload" in message
 
 
+async def test_a_boiler_that_serves_only_part_of_its_block(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A controller that answers only some of a module's registers keeps those.
+
+    The reported case: the boiler serves its temperatures but refuses the
+    circulation registers at the end of its block. The probe reads the block a
+    register at a time and builds the boiler from what answered, so the served
+    temperatures — and the hot-water climate's controls — come through instead of
+    the whole boiler going unavailable.
+    """
+    controller.refuse(2004)  # actual_circulation_temperature
+    controller.refuse(2005)  # actual_circulation_pump_state
+    entry = await setup_entry(hass, controller, legacy=True)
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.runtime_data.counts["boil"] == 1
+    # The served temperatures are read; the climate's current/target read these.
+    assert state_of(hass, "eu08l_boil1_actual_high_temperature") == "48.0"
+    assert state_of(hass, "eu08l_boil1_target_high_temperature") == "52.0"
+    # Only the refused registers are unavailable, and nothing else broke.
+    assert state_of(hass, "eu08l_boil1_actual_circulation_temperature") in (
+        "unknown",
+        "unavailable",
+    )
+    assert state_of(hass, "eu08l_hp1_flow_line_temperature") == "34.12"
+
+
+async def test_a_heat_pump_without_the_undocumented_registers(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A firmware that lacks the refrigerant and capacity registers still sets up.
+
+    They sit at the end of the heat pump's block and some firmware does not serve
+    them; the probe leaves them out, and the documented values are unaffected.
+    """
+    for address in (*range(1024, 1034), *range(1051, 1061)):
+        controller.refuse(address)
+    entry = await setup_entry(hass, controller, legacy=True)
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.runtime_data.last_update_success
+    assert state_of(hass, "eu08l_hp1_flow_line_temperature") == "34.12"
+    # A refrigerant register the controller does not serve reads unavailable.
+    assert state_of(hass, "eu08l_hp1_hot_gas_temperature") in ("unknown", "unavailable")
+    # The one config register just before the capacity block is still served.
+    assert state_of(hass, "eu08l_hp1_config_parameter_50") == "0"
+
+
 async def test_only_the_totals_are_enabled_by_default(
     hass: HomeAssistant, controller: Controller
 ) -> None:

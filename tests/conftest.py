@@ -87,10 +87,15 @@ class Controller:
     ports: list = field(default_factory=list)
     unit_ids: list = field(default_factory=list)
     _units: list[MockModbusUnit] = field(default_factory=list)
+    # Registers the controller refuses, beyond the absent-module blocks. Kept so
+    # a refusal armed before setup is applied to the connection setup opens too —
+    # which is how a controller that serves only part of a module block is set up.
+    _refused: set[int] = field(default_factory=set)
 
     def refuse(self, address: int) -> None:
-        """Stop answering for any block covering this register, as a pulled
-        module does."""
+        """Stop answering for any block covering this register, as a controller
+        does for a register its firmware does not serve."""
+        self._refused.add(address)
         for unit in self._units:
             unit.fail_read(address, ModbusExceptionError(ILLEGAL_DATA_ADDRESS))
 
@@ -128,6 +133,8 @@ def controller() -> Iterator[Controller]:
             # over one link is there to be read over the next.
             unit.holding = device.registers
             _refuse_absent_modules(unit)
+            for address in device._refused:
+                unit.fail_read(address, ModbusExceptionError(ILLEGAL_DATA_ADDRESS))
             if unit not in device._units:
                 device._units.append(unit)
             return unit

@@ -523,7 +523,7 @@ class LambdaSensor(LambdaEntity, SensorEntity):
             component = getattr(self.coordinator.device, self._component)
         else:
             component = self.coordinator.component(self._module, self._index)
-        field = type(component).__dict__.get(self._attribute)
+        field = component.declared_fields[self._attribute]
         # The field's converter is the state enum it decodes to.
         return [state.label for state in field.convert]
 

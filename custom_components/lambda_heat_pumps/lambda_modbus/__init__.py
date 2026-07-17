@@ -13,18 +13,30 @@ would require.
     connection = await connect_tcp("192.168.1.50", port=502)
     try:
         controller = LambdaHeatPump(connection.for_unit(1), num_hps=2)
+        await controller.async_setup()
         await controller.async_update()
         print(controller.ambient.temperature)
         print(controller.heat_pumps[0].flow_line_temperature)
     finally:
         await connection.close()
+
+A controller's register map depends on its firmware: it serves a subset of the
+registers a module could have, and refuses a block read that reaches a register
+it does not serve — which, read atomically, would take the served registers
+around it down too. So the layout is not declared and read; it is *probed*.
+:meth:`LambdaHeatPump.async_setup` reads each module a run at a time, drops to
+one register at a time on a run the controller refuses, and builds each module
+from the registers it actually answered for. What it does not serve simply is not
+read, and its entities read ``None``.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import copy
+from typing import TYPE_CHECKING, Any
 
-from modbus_connection.model import Component, ComponentGroup
+from modbus_connection import ModbusExceptionError
+from modbus_connection.model import ManualComponent
 
 from .boiler import Boiler
 from .buffer import Buffer
@@ -32,7 +44,13 @@ from .general import Ambient, EManager
 from .heat_pump import HeatPump, HeatPumpLowFirst
 from .heating_circuit import HeatingCircuit
 from .model import LambdaComponent
-from .ranges import base_address, readable_ranges
+from .ranges import (
+    AMBIENT_RANGES,
+    E_MANAGER_RANGES,
+    Range,
+    base_address,
+    module_ranges,
+)
 from .solar import Solar, SolarLowFirst
 
 if TYPE_CHECKING:
@@ -47,8 +65,56 @@ __all__ = [
     "HeatingCircuit",
     "LambdaComponent",
     "LambdaHeatPump",
+    "LambdaManualComponent",
     "Solar",
 ]
+
+
+class LambdaManualComponent(ManualComponent):
+    """A module built from the registers the controller actually serves.
+
+    A :class:`modbus_connection.model.ManualComponent` reached by attribute, so
+    the rest of the integration reads a value as ``component.flow_line_temperature``
+    (the field key) just as it did off the typed component it replaces. A key the
+    controller did not serve was never added, so it reads ``None``.
+    """
+
+    # Every field the module could have, keyed by name, whether or not this
+    # controller serves it. The served subset is what is read; this is for
+    # metadata that does not depend on serving, like a state field's enum labels.
+    declared_fields: dict[str, Any] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        # __getattr__ runs only for names normal lookup misses, so the real
+        # methods and private state are untouched; a leading underscore is never
+        # a field key, so let those raise rather than resolve to a None value.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self.get(name)
+
+
+async def _probe_served(unit: ModbusUnit, ranges: tuple[Range, ...]) -> set[int]:
+    """The addresses in ``ranges`` the controller answers for.
+
+    Each run is tried as one block read; a run the controller refuses is retried
+    one register at a time, so the served registers in it are still found. Only a
+    Modbus *exception* (a refusal) is caught — a timeout or a dropped link is not
+    an answer about the register map and propagates, so setup fails and retries.
+    """
+    served: set[int] = set()
+    for low, high in ranges:
+        try:
+            await unit.read_holding_registers(low, high - low + 1)
+        except ModbusExceptionError:
+            for address in range(low, high + 1):
+                try:
+                    await unit.read_holding_registers(address, 1)
+                except ModbusExceptionError:
+                    continue  # a register the controller does not serve
+                served.add(address)
+        else:
+            served.update(range(low, high + 1))
+    return served
 
 
 class LambdaHeatPump:
@@ -57,6 +123,9 @@ class LambdaHeatPump:
     `word_order` is how the controller lays out its 32-bit counters across two
     registers: `"big"` (the default, high word first) or `"little"`. It varies by
     controller, which is why it is configurable rather than modelled.
+
+    Construct, then :meth:`async_setup` once to probe the register map, then
+    :meth:`async_update` on a schedule.
     """
 
     def __init__(
@@ -71,47 +140,75 @@ class LambdaHeatPump:
         word_order: WordOrder = "big",
     ) -> None:
         self._unit = unit
+        self._word_order = word_order
+        self._counts = {
+            "hp": num_hps,
+            "boil": num_boil,
+            "buff": num_buff,
+            "sol": num_sol,
+            "hc": num_hc,
+        }
 
-        heat_pump_class = HeatPump if word_order == "big" else HeatPumpLowFirst
-        solar_class = Solar if word_order == "big" else SolarLowFirst
+        # Populated by async_setup; declared here so the attributes always exist.
+        self.ambient: LambdaManualComponent
+        self.e_manager: LambdaManualComponent
+        self.heat_pumps: list[LambdaManualComponent] = []
+        self.boilers: list[LambdaManualComponent] = []
+        self.buffers: list[LambdaManualComponent] = []
+        self.solar_modules: list[LambdaManualComponent] = []
+        self.heating_circuits: list[LambdaManualComponent] = []
 
-        self.ambient = Ambient(unit)
-        self.e_manager = EManager(unit)
-        self.heat_pumps = self._build(heat_pump_class, unit, "hp", num_hps)
-        self.boilers = self._build(Boiler, unit, "boil", num_boil)
-        self.buffers = self._build(Buffer, unit, "buff", num_buff)
-        self.solar_modules = self._build(solar_class, unit, "sol", num_sol)
-        self.heating_circuits = self._build(HeatingCircuit, unit, "hc", num_hc)
+    async def async_setup(self) -> None:
+        """Probe the controller and build each module from what it serves."""
+        heat_pump_class = HeatPump if self._word_order == "big" else HeatPumpLowFirst
+        solar_class = Solar if self._word_order == "big" else SolarLowFirst
 
-        # Which registers the controller answers depends on which modules are
-        # installed, so the ranges are computed here and pushed onto every
-        # component — a ComponentGroup requires its members to agree on them.
-        ranges = readable_ranges(
-            {
-                "hp": num_hps,
-                "boil": num_boil,
-                "buff": num_buff,
-                "sol": num_sol,
-                "hc": num_hc,
-            }
-        )
-        for component in self.components:
-            component.register_ranges = ranges
+        self.ambient = await self._build(Ambient, 0, AMBIENT_RANGES)
+        self.e_manager = await self._build(EManager, 0, E_MANAGER_RANGES)
+        self.heat_pumps = await self._build_all(heat_pump_class, "hp")
+        self.boilers = await self._build_all(Boiler, "boil")
+        self.buffers = await self._build_all(Buffer, "buff")
+        self.solar_modules = await self._build_all(solar_class, "sol")
+        self.heating_circuits = await self._build_all(HeatingCircuit, "hc")
 
-        self._group = ComponentGroup(unit, self.components)
-
-    @staticmethod
-    def _build[C: LambdaComponent](
-        component_class: type[C], unit: ModbusUnit, module: str, count: int
-    ) -> list[C]:
+    async def _build_all(
+        self, component_class: type[LambdaComponent], module: str
+    ) -> list[LambdaManualComponent]:
         """One component per installed module, each at its own 100-register block."""
         return [
-            component_class(unit, index=index, base_offset=base_address(module, index))
-            for index in range(1, count + 1)
+            await self._build(
+                component_class, base_address(module, index), module_ranges(module)
+            )
+            for index in range(1, self._counts[module] + 1)
         ]
 
+    async def _build(
+        self,
+        component_class: type[LambdaComponent],
+        base: int,
+        relative_ranges: tuple[Range, ...],
+    ) -> LambdaManualComponent:
+        """Probe one module's runs and add the fields it answers for.
+
+        A field is added only when the controller serves every register it spans,
+        with its address shifted from the layout-relative one the class declares
+        to the absolute one this module sits at.
+        """
+        ranges = tuple((base + low, base + high) for low, high in relative_ranges)
+        served = await _probe_served(self._unit, ranges)
+
+        component = LambdaManualComponent(self._unit, holding_ranges=ranges)
+        component.declared_fields = component_class._register_fields
+        for name, field in component_class._register_fields.items():
+            address = base + field.address
+            if all(address + offset in served for offset in range(field.count)):
+                absolute = copy.copy(field)
+                absolute.address = address
+                component.add(name, absolute, space="holding")
+        return component
+
     @property
-    def components(self) -> tuple[Component, ...]:
+    def components(self) -> tuple[LambdaManualComponent, ...]:
         """Every sub-system that is polled."""
         return (
             self.ambient,
@@ -124,5 +221,11 @@ class LambdaHeatPump:
         )
 
     async def async_update(self) -> None:
-        """Refresh every sub-system in one pooled set of block reads."""
-        await self._group.async_update()
+        """Refresh every sub-system.
+
+        Each module is read on its own, so they are independent: one that stops
+        answering raises, and the caller decides what that means, without the
+        others' reads riding on it.
+        """
+        for component in self.components:
+            await component.async_update()

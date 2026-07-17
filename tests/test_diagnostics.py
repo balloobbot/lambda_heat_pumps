@@ -59,6 +59,27 @@ async def test_the_dump_covers_the_installed_modules_only(
     }
 
 
+async def test_the_dump_keeps_going_past_a_refused_register(
+    hass: HomeAssistant, controller: Controller, hass_client
+) -> None:
+    """A register the controller refuses drops out; the rest still comes through.
+
+    A truncated controller is the one whose dump is worth having, so the read
+    falls back to one register at a time and does not stop at the first refusal.
+    """
+    controller.refuse(2004)  # inside the boiler block
+    controller.refuse(2005)
+    entry = await setup_entry(hass, controller, legacy=True)
+    registers = (await _diagnostics(hass, entry, hass_client))["registers"]
+
+    # The served registers on both sides of the refusal are there.
+    assert registers["2002"] == 480
+    assert registers["2050"] == 520
+    # The refused ones are simply absent, not an error that ended the dump.
+    assert "2004" not in registers
+    assert registers["5002"] == 340  # a later module still got read
+
+
 async def test_the_host_is_redacted(
     hass: HomeAssistant, controller: Controller, hass_client
 ) -> None:

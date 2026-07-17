@@ -59,6 +59,22 @@ def base_address(module: str, index: int) -> int:
     return BASE_ADDRESSES[module] + (index - 1) * BLOCK_STRIDE
 
 
+# The controller's own two sub-systems sit at fixed addresses, not in a module
+# block: ambient at 0-4, the e-manager at 100-104. Each reads within its own run.
+AMBIENT_RANGES: tuple[Range, ...] = ((0, 4),)
+E_MANAGER_RANGES: tuple[Range, ...] = ((100, 104),)
+
+
+def module_ranges(module: str) -> tuple[Range, ...]:
+    """The readable runs within one module's block, relative to its base address.
+
+    A run is a stretch the controller answers as one block read; the gaps between
+    runs are unmapped, and a register that only answers on its own is a run of
+    one. See this module's docstring.
+    """
+    return _MODULE_RANGES[module]
+
+
 def readable_ranges(counts: dict[str, int]) -> tuple[Range, ...]:
     """The absolute readable ranges for a controller with these module counts.
 
