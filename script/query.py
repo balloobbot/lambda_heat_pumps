@@ -89,6 +89,9 @@ async def _run(args: argparse.Namespace) -> int:
             num_hc=args.num_hc,
             word_order=args.word_order,
         )
+        # The controller's register map depends on its firmware, so it is probed
+        # before it is read; nothing is modelled until this has run.
+        await controller.async_setup()
         start = time.monotonic()
         await controller.async_update()
         elapsed = time.monotonic() - start
