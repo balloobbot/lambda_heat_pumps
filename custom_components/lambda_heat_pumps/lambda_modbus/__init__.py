@@ -186,15 +186,18 @@ class LambdaHeatPump:
         # Ranges are declared in the same coordinates as the field addresses, so
         # they are stated relative to the block and the component shifts them.
         component.register_ranges = relative_ranges
-        # Keeping only the fields the controller serves also splits the ranges
-        # around the ones it does not, so a block never spans a refused register.
+        # `resolved_fields` says where each field actually landed on the device,
+        # base offset and all, so the probe's absolute addresses can be compared
+        # against it directly. Keeping only the fields the controller serves also
+        # splits the ranges around the ones it does not, so a block never spans a
+        # refused register.
         component.restrict_fields(
             [
                 name
-                for name, field in component_class.declared_fields.items()
+                for name, resolved in component.resolved_fields.items()
                 if all(
-                    base + field.address + offset in served
-                    for offset in range(field.count)
+                    resolved.address + offset in served
+                    for offset in range(resolved.count)
                 )
             ]
         )

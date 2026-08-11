@@ -32,9 +32,10 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from modbus_connection import (
-    BlockReadError,
+    IllegalDataAddressError,
     ModbusConnection,
     ModbusError,
+    ModbusTimeoutError,
     ModbusUnit,
 )
 
@@ -67,15 +68,19 @@ from .const import (
     THERMAL_ENERGY_MODES,
 )
 from .lambda_modbus import LambdaHeatPump
-from .lambda_modbus.ranges import base_address
 
 _LOGGER = logging.getLogger(__name__)
 
 type LambdaConfigEntry = ConfigEntry[LambdaCoordinator]
 
-# The two registers the fast poll reads, relative to a heat pump's block.
-_OPERATING_STATE_REGISTER = 3
-_COMPRESSOR_RATING_REGISTER = 10
+# The two fields the fast poll reads; where they sit on the controller comes
+# from the heat pump's own layout, not from a second copy of the address map.
+_FAST_POLL_FIELDS = ("operating_state", "compressor_unit_rating")
+
+# Consecutive timed-out polls before the link itself is suspect. A device that
+# stops answering while its socket stays open never drops the link, so nothing
+# would re-establish it on its own.
+_TIMEOUTS_BEFORE_RECYCLING_THE_LINK = 3
 
 # The controller reports both energy counters in Wh; the sensors are in kWh.
 _WH_PER_KWH = 1000.0
@@ -181,6 +186,8 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
             )
         )
         self._polling = False
+        # Consecutive polls that timed out, for spotting a wedged link.
+        self._timeouts = 0
 
     def component(self, module: str, index: int):
         """The modelled sub-system for one module, by 1-based index."""
@@ -245,24 +252,50 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
             # it is down, over the same unit handles, so a drop costs at most the
             # poll it happened on and nothing has to be rebuilt.
             await self.device.async_update()
-        except BlockReadError as err:
-            # The controller refused a block the probe found it serving, so what
-            # was read off it at setup no longer describes it — a module was
-            # added or removed, or its firmware changed. Only setting up again
-            # can find out what it has now, so ask for that rather than telling
-            # the user to; the block is named for the log.
+        except IllegalDataAddressError as err:
+            # The controller says it does not serve an address the probe found
+            # it serving, so what was read off it at setup no longer describes
+            # it — a module was added or removed, or its firmware changed. Only
+            # setting up again can find out what it has now, so ask for that
+            # rather than telling the user to; the block is named for the log.
+            # Every other exception code is the controller having a problem with
+            # a block it does serve — busy, or a failure of its own — which the
+            # next poll can just try again, so none of them reload anything.
             self.hass.config_entries.async_schedule_reload(
                 self.config_entry.entry_id
             )
+            block = err.block
+            refused = (
+                f"{block.space} registers "
+                f"{block.address}-{block.address + block.count - 1}"
+                if block is not None
+                else "registers"
+            )
             raise UpdateFailed(
-                f"The controller refused {err.space} registers "
-                f"{err.address}-{err.address + err.count - 1}, which it served "
-                f"when it was set up; looking again at what it has."
+                f"The controller refused {refused}, which it served when it was "
+                f"set up; looking again at what it has."
             ) from err
+        except ModbusTimeoutError as err:
+            # A controller behind a serial-to-network bridge can go on holding
+            # the socket open while nothing behind it answers, so the link is
+            # never lost and never re-established. Drop it after a few of these
+            # and the next poll opens a fresh one, without reloading the entry.
+            self._timeouts += 1
+            if self._timeouts >= _TIMEOUTS_BEFORE_RECYCLING_THE_LINK:
+                _LOGGER.debug("Recycling the link after %d timeouts", self._timeouts)
+                self._timeouts = 0
+                try:
+                    await self.connection.disconnect()
+                except ModbusError as close_err:
+                    # The link is dropped either way, so this is only worth a log.
+                    _LOGGER.debug("Tearing the link down failed: %s", close_err)
+            raise UpdateFailed(f"Error reading the controller: {err}") from err
         except ModbusError as err:
             raise UpdateFailed(f"Error reading the controller: {err}") from err
         finally:
             self._polling = False
+
+        self._timeouts = 0
 
         for index in self.totals:
             heat_pump = self.component("hp", index)
@@ -281,22 +314,29 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
         The full poll counts cycles from what it reads too, so this only closes
         the gap between them; both feed the same running state, so a cycle seen
         by both is still only counted once.
+
+        Each register is read on its own, as the full poll's plan reads it: the
+        two sit inside one of the controller's runs, but a block spanning them
+        would also cover the registers between, which is more of the controller
+        than a poll this frequent has any business asking for.
         """
         if self._polling:
             return
         try:
             for index in self.totals:
-                base = base_address("hp", index)
+                resolved = self.component("hp", index).resolved_fields
+                if any(name not in resolved for name in _FAST_POLL_FIELDS):
+                    # This controller does not serve one of them, so it was
+                    # dropped from the read plan at setup; the full poll counts
+                    # what it can and there is nothing to do here.
+                    continue
+                state_address, rating_address = (
+                    resolved[name].address for name in _FAST_POLL_FIELDS
+                )
                 operating_state = (
-                    await self.unit.read_holding_registers(
-                        base + _OPERATING_STATE_REGISTER, 1
-                    )
+                    await self.unit.read_holding_registers(state_address, 1)
                 )[0]
-                rating = (
-                    await self.unit.read_holding_registers(
-                        base + _COMPRESSOR_RATING_REGISTER, 1
-                    )
-                )[0]
+                rating = (await self.unit.read_holding_registers(rating_address, 1))[0]
                 self._track_cycles(index, operating_state, bool(rating))
         except ModbusError as err:
             # The full poll decides whether the device is available; a missed

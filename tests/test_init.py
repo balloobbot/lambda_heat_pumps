@@ -246,6 +246,17 @@ async def test_an_unserved_register_between_two_served_ones(
         "unavailable",
     )
 
+    # And the blocks the poll actually asked for say so directly: the boiler's
+    # run is read as two, cut either side of the hole, never as the one
+    # 2000-2005 it was declared as.
+    controller.forget_reads()
+    await entry.runtime_data.async_refresh()
+    assert [
+        (event.address, event.count)
+        for event in controller.reads()
+        if 2000 <= event.address < 2100
+    ] == [(2000, 2), (2003, 3), (2050, 1)]
+
 
 async def test_a_heat_pump_without_the_undocumented_registers(
     hass: HomeAssistant, controller: Controller
@@ -348,6 +359,64 @@ async def test_an_unreachable_controller_goes_unavailable_without_reloading(
         registry.async_get_entity_id("sensor", DOMAIN, "eu08l_hp1_flow_line_temperature")
         == entity_id
     )
+
+
+async def test_a_controller_that_is_merely_busy_is_not_probed_again(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """Only a refused address means the register map has changed.
+
+    A controller answering "busy" is one that could not get to a block it does
+    serve — the map is fine and the next poll will get it. Setting up again would
+    tear down every entity and re-probe the whole controller over a hiccup.
+    """
+    entry = await setup_entry(hass, controller, legacy=True)
+    coordinator = entry.runtime_data
+
+    controller.answer_busy(1004)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert not coordinator.last_update_success
+    assert entry.state is ConfigEntryState.LOADED
+    # The same coordinator, so nothing was set up again.
+    assert entry.runtime_data is coordinator
+
+
+async def test_a_link_that_is_up_but_answers_nothing_is_recycled(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A wedged link is dropped, so the next poll opens a fresh one.
+
+    Nothing else would: the socket is still open, so the connection never
+    notices it was lost and never re-establishes itself. Dropping it costs a
+    handshake, where reloading the entry would cost every entity.
+    """
+    entry = await setup_entry(hass, controller, legacy=True)
+    coordinator = entry.runtime_data
+    connection = coordinator.connection
+
+    controller.wedge()
+    await coordinator.async_refresh()
+    assert not coordinator.last_update_success
+    # One timed-out poll is a slow reply, not a wedged link.
+    assert connection.connected
+
+    await coordinator.async_refresh()
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert not connection.connected
+    assert entry.state is ConfigEntryState.LOADED  # and never reloaded
+
+    # The controller comes back, and the next poll builds a link and reads it.
+    controller.come_back_online()
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success
+    assert connection.connected
+    assert state_of(hass, "eu08l_hp1_flow_line_temperature") == "34.12"
 
 
 async def test_only_the_totals_are_enabled_by_default(
