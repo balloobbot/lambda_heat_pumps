@@ -258,6 +258,41 @@ async def test_an_unserved_register_between_two_served_ones(
     ] == [(2000, 2), (2003, 3), (2050, 1)]
 
 
+async def test_a_poll_asks_for_the_blocks_the_controller_answers(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """Every declared run is one request, and no request spans two of them.
+
+    The registers the controller only serves one at a time — a heat pump's
+    capacity limits and a heating circuit's flow-line setpoint — are declared as
+    runs of their own for exactly this reason, so a poll asking for them singly
+    is the whole point of the map. Nothing here may be merged into its
+    neighbour, and no request may cross from one module's block into another's.
+    """
+    entry = await setup_entry(hass, controller)
+    controller.forget_reads()
+    await entry.runtime_data.async_refresh()
+    blocks = [(event.address, event.count) for event in controller.reads()]
+
+    assert blocks == [
+        (0, 5),  # ambient
+        (100, 5),  # e-manager
+        # Heat pump 1: the runs either side of the hole at 1014, a request per
+        # 32-bit counter, then the capacity limits one register at a time.
+        (1000, 14),
+        (1015, 5),
+        (1020, 2),
+        (1022, 2),
+        (1024, 10),
+        *((address, 1) for address in range(1050, 1061)),
+        (2000, 6),  # boiler 1
+        (2050, 1),
+        (5000, 7),  # heating circuit 1
+        (5007, 1),  # its flow-line setpoint, only answered on its own
+        (5050, 3),
+    ]
+
+
 async def test_a_heat_pump_without_the_undocumented_registers(
     hass: HomeAssistant, controller: Controller
 ) -> None:
