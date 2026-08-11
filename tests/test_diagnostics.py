@@ -80,6 +80,25 @@ async def test_the_dump_keeps_going_past_a_refused_register(
     assert registers["5002"] == 340  # a later module still got read
 
 
+async def test_the_dump_says_where_each_field_was_read_from(
+    hass: HomeAssistant, controller: Controller, hass_client
+) -> None:
+    """The layout ties a raw word in the dump to the field that reports it.
+
+    It is the layout the poll used, not the one the model declares, so a field
+    the controller does not serve is missing from it — which is how a dump shows
+    that an entity reads as unknown because the register was never asked for.
+    """
+    controller.refuse(2004)  # actual_circulation_temperature
+    entry = await setup_entry(hass, controller, legacy=True)
+    layout = (await _diagnostics(hass, entry, hass_client))["layout"]
+
+    assert layout["hp1"]["flow_line_temperature"] == 1004
+    assert layout["ambient"]["temperature"] == 2
+    assert layout["boil1"]["actual_high_temperature"] == 2002
+    assert "actual_circulation_temperature" not in layout["boil1"]
+
+
 async def test_the_host_is_redacted(
     hass: HomeAssistant, controller: Controller, hass_client
 ) -> None:
