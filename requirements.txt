@@ -1,1 +1,1 @@
-modbus-connection[tmodbus]==4.5.0
+modbus-connection[tmodbus]==4.5.1
