@@ -1,1 +1,1 @@
-modbus-connection[tmodbus]>=4.6.0
+modbus-connection[tmodbus]>=4.6.1
