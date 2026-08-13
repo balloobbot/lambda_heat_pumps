@@ -89,6 +89,17 @@ _WH_PER_KWH = 1000.0
 _MODULE_NAMES = {"hp": "HP", "boil": "Boiler", "buff": "Buffer", "sol": "Solar", "hc": "HC"}
 
 
+def _refused(errors: dict[str, IllegalDataAddressError]) -> str:
+    """Name the blocks the controller refused, for the log."""
+    return ", ".join(
+        f"{name}'s {block.space} registers "
+        f"{block.address}-{block.address + block.count - 1}"
+        if (block := err.block) is not None
+        else f"{name}'s registers"
+        for name, err in errors.items()
+    )
+
+
 def _periods_ending(now: datetime) -> list[str]:
     """The periods that roll over at this hour boundary."""
     periods = [PERIOD_HOURLY]
@@ -189,6 +200,10 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
         # Consecutive polls that timed out, for spotting a wedged link.
         self._timeouts = 0
 
+        # What the last poll could not read, by sub-system name. Those keep the
+        # values they had, so the entities reading them say so.
+        self.failed: dict[str, ModbusError] = {}
+
     def component(self, module: str, index: int):
         """The modelled sub-system for one module, by 1-based index."""
         return getattr(self.device, MODULES[module])[index - 1]
@@ -258,51 +273,67 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
             # The connection re-establishes itself: a request opens the link if
             # it is down, over the same unit handles, so a drop costs at most the
             # poll it happened on and nothing has to be rebuilt.
-            await self.device.async_update()
-        except IllegalDataAddressError as err:
-            # The controller says it does not serve an address the probe found
-            # it serving, so what was read off it at setup no longer describes
-            # it — a module was added or removed, or its firmware changed. Only
-            # setting up again can find out what it has now, so ask for that
-            # rather than telling the user to; the block is named for the log.
-            # Every other exception code is the controller having a problem with
-            # a block it does serve — busy, or a failure of its own — which the
-            # next poll can just try again, so none of them reload anything.
-            self.hass.config_entries.async_schedule_reload(
-                self.config_entry.entry_id
-            )
-            block = err.block
-            refused = (
-                f"{block.space} registers "
-                f"{block.address}-{block.address + block.count - 1}"
-                if block is not None
-                else "registers"
-            )
-            raise UpdateFailed(
-                f"The controller refused {refused}, which it served when it was "
-                f"set up; looking again at what it has."
-            ) from err
-        except ModbusTimeoutError as err:
-            # A controller behind a serial-to-network bridge can go on holding
-            # the socket open while nothing behind it answers, so the link is
-            # never lost and never re-established. Drop it after a few of these
-            # and the next poll opens a fresh one, without reloading the entry.
-            self._timeouts += 1
-            if self._timeouts >= _TIMEOUTS_BEFORE_RECYCLING_THE_LINK:
-                _LOGGER.debug("Recycling the link after %d timeouts", self._timeouts)
-                self._timeouts = 0
-                try:
-                    await self.connection.disconnect()
-                except ModbusError as close_err:
-                    # The link is dropped either way, so this is only worth a log.
-                    _LOGGER.debug("Tearing the link down failed: %s", close_err)
-            raise UpdateFailed(f"Error reading the controller: {err}") from err
+            report = await self.device.async_update()
         except ModbusError as err:
+            # Only the link itself failing gets this far — a sub-system the
+            # controller would not answer for is reported, not raised.
             raise UpdateFailed(f"Error reading the controller: {err}") from err
         finally:
             self._polling = False
 
+        self.failed = report.failed
+
+        stale: dict[str, IllegalDataAddressError] = {
+            name: err
+            for name, err in report.failed.items()
+            if isinstance(err, IllegalDataAddressError)
+        }
+        if stale:
+            # The controller says it does not serve an address the probe found
+            # it serving, so what was read off it at setup no longer describes
+            # it — a module was added or removed, or its firmware changed. Only
+            # setting up again can find out what it has now, so ask for that
+            # rather than telling the user to; the blocks are named for the log.
+            # Every other exception code is the controller having a problem with
+            # a block it does serve — busy, or a failure of its own — which the
+            # next poll can just try again, so none of them reload anything.
+            self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
+            raise UpdateFailed(
+                f"The controller refused {_refused(stale)}, which it served when "
+                f"it was set up; looking again at what it has."
+            ) from next(iter(stale.values()))
+
+        if report.failed and not report.updated:
+            # Nothing answered at all, so it is the controller that is not
+            # talking rather than one of its modules. A controller behind a
+            # serial-to-network bridge can go on holding the socket open while
+            # nothing behind it answers, so the link is never lost and never
+            # re-established. Drop it after a few of these and the next poll
+            # opens a fresh one, without reloading the entry.
+            first = next(iter(report.failed.values()))
+            if any(
+                isinstance(err, ModbusTimeoutError)
+                for err in report.failed.values()
+            ):
+                self._timeouts += 1
+                if self._timeouts >= _TIMEOUTS_BEFORE_RECYCLING_THE_LINK:
+                    _LOGGER.debug(
+                        "Recycling the link after %d timeouts", self._timeouts
+                    )
+                    self._timeouts = 0
+                    try:
+                        await self.connection.disconnect()
+                    except ModbusError as close_err:
+                        # The link is dropped either way, so this is only worth a log.
+                        _LOGGER.debug("Tearing the link down failed: %s", close_err)
+            raise UpdateFailed(f"Error reading the controller: {first}") from first
+
         self._timeouts = 0
+        if report.failed:
+            _LOGGER.debug(
+                "Kept the last values for %s",
+                "; ".join(f"{name}: {err}" for name, err in report.failed.items()),
+            )
 
         for index in self.totals:
             heat_pump = self.component("hp", index)

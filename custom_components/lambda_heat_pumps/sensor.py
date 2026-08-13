@@ -498,7 +498,13 @@ class LambdaSensor(LambdaEntity, SensorEntity):
         attribute: str | None = None,
     ) -> None:
         """Bind the sensor to the field it reports."""
-        super().__init__(coordinator, description.key, module, index)
+        super().__init__(
+            coordinator,
+            description.key,
+            module,
+            index,
+            component=component or f"{module}{index}",
+        )
         self.entity_description = description
         self._attr_translation_key = description.key
         self._component = component

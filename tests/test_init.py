@@ -412,10 +412,12 @@ async def test_a_controller_that_is_merely_busy_is_not_probed_again(
     await coordinator.async_refresh()
     await hass.async_block_till_done()
 
-    assert not coordinator.last_update_success
     assert entry.state is ConfigEntryState.LOADED
     # The same coordinator, so nothing was set up again.
     assert entry.runtime_data is coordinator
+    # The heat pump is all it could not read; see test_resilience.py for what
+    # the rest of the controller does meanwhile.
+    assert set(coordinator.failed) == {"hp1"}
 
 
 async def test_a_link_that_is_up_but_answers_nothing_is_recycled(
