@@ -100,6 +100,32 @@ async def test_a_failed_modules_lifetime_counters_stay_available(
     )
 
 
+async def test_a_silent_controller_leaves_the_totals_alone(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A controller that is switched off is the case that costs the most.
+
+    Heat pumps are shut down for the season and inverters sleep every night, so
+    a whole poll failing is routine rather than exceptional — and it used to
+    take every entity down, counters included, because a failed poll fails them
+    all at the coordinator.
+    """
+    entry = await setup_entry(hass, controller, legacy=True)
+    coordinator = entry.runtime_data
+
+    controller.go_offline()
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert not coordinator.last_update_success
+    assert state_of(hass, "eu08l_hp1_flow_line_temperature") == "unavailable"
+    assert (
+        state_of(hass, "eu08l_hp1_compressor_power_consumption_accumulated") == "100000"
+    )
+    # Counted rather than read, and just as much worth keeping.
+    assert state_of(hass, "eu08l_hp1_heating_cycling_total") != "unavailable"
+
+
 async def test_listeners_fire_only_once_every_module_has_been_tried(
     hass: HomeAssistant, controller: Controller
 ) -> None:
