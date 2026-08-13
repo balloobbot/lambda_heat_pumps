@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from modbus_connection import ModbusExceptionError
+from modbus_connection import IllegalDataAddressError, IllegalFunctionError
 
 from .boiler import Boiler
 from .buffer import Buffer
@@ -69,24 +69,30 @@ __all__ = [
     "Solar",
 ]
 
+# What a controller answers with when a register is not there. Every other
+# answer — busy, a failure of its own, a gateway that could not reach it — says
+# nothing about the register map, and a register written off over one of those
+# would stay unread for the life of the object.
+_NOT_SERVED = (IllegalDataAddressError, IllegalFunctionError)
+
 
 async def _probe_served(unit: ModbusUnit, ranges: tuple[Range, ...]) -> set[int]:
     """The addresses in ``ranges`` the controller answers for.
 
     Each run is tried as one block read; a run the controller refuses is retried
     one register at a time, so the served registers in it are still found. Only a
-    Modbus *exception* (a refusal) is caught — a timeout or a dropped link is not
-    an answer about the register map and propagates, so setup fails and retries.
+    refusal is an answer about the register map — anything else propagates, so
+    setup fails and retries rather than narrowing the read plan over a hiccup.
     """
     served: set[int] = set()
     for low, high in ranges:
         try:
             await unit.read_holding_registers(low, high - low + 1)
-        except ModbusExceptionError:
+        except _NOT_SERVED:
             for address in range(low, high + 1):
                 try:
                     await unit.read_holding_registers(address, 1)
-                except ModbusExceptionError:
+                except _NOT_SERVED:
                     continue  # a register the controller does not serve
                 served.add(address)
         else:
