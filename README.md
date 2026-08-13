@@ -46,6 +46,8 @@ The integration features **automatic module detection** and **smart configuratio
 - **Smart Defaults**: Applies optimal settings for your specific Lambda configuration
 - **Configuration Validation**: Prevents duplicate configurations and validates existing connections
 
+**Partial updates**: every module is read on its own, so a controller that cannot answer for one of them does not take the rest down with it. Only that module's entities go unavailable — they keep the values they last read rather than reporting them as current — while everything else carries on updating, and the next poll picks the module up again. Only a controller that cannot be reached at all makes the whole integration unavailable.
+
 #### Firmware Version
 The firmware version is only important to decide which sensors are available.<br>
 To find the firmware version follow this from the main screen:
@@ -128,6 +130,8 @@ Die Integration bietet **automatische Modulerkennung** und **intelligente Konfig
 - **Dynamische Entity-Erstellung**: Erstellt Sensoren und Entities basierend auf erkanntem Hardware
 - **Intelligente Standardeinstellungen**: Wendet optimale Einstellungen für Ihre spezifische Lambda-Konfiguration an
 - **Konfigurationsvalidierung**: Verhindert doppelte Konfigurationen und validiert bestehende Verbindungen
+
+**Teilweise Aktualisierung**: Jedes Modul wird für sich gelesen. Kann der Controller eines davon nicht beantworten, reißt das die übrigen nicht mit: Nur die Entitäten dieses Moduls werden „nicht verfügbar" — sie behalten die zuletzt gelesenen Werte, anstatt sie als aktuell auszugeben — während alles andere weiter aktualisiert wird und die nächste Abfrage das Modul wieder einholt. Nur ein Controller, der überhaupt nicht erreichbar ist, macht die gesamte Integration nicht verfügbar.
 
 #### Firmware Version
 Die Firmware-Version is nur wichtig um zu entscheiden welche Sensoren verfügbar sind.<br>
