@@ -63,6 +63,14 @@ class LambdaEntity(CoordinatorEntity[LambdaCoordinator]):
         are no longer the controller's — so its entities go unavailable while
         the rest of the controller carries on reporting.
         """
-        if self._polled is not None and self._polled in self.coordinator.failed:
+        if self._polled is None:
+            # A running total stays available whatever happened to the poll,
+            # including a controller that is gone for good: a gap in it reads as
+            # a counter reset and takes the long-term statistics with it, and
+            # heat pumps are switched off for the season as inverters are at
+            # night. Saying whether the controller is answering is a
+            # connectivity entity's job, not a counter's.
+            return True
+        if self._polled in self.coordinator.failed:
             return False
         return super().available
