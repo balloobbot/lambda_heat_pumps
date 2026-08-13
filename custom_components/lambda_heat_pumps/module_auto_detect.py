@@ -11,8 +11,9 @@ from __future__ import annotations
 import logging
 
 from modbus_connection import (
+    IllegalDataAddressError,
+    IllegalFunctionError,
     ModbusError,
-    ModbusExceptionError,
     ModbusTimeoutError,
     ModbusUnit,
 )
@@ -52,13 +53,15 @@ async def _count(unit: ModbusUnit, module: str, maximum: int) -> int:
     """How many of one module type answer, counting up from the first.
 
     A module that is not installed either refuses the read or stays silent. A
-    connection that is down raises instead — that is not an answer about the
-    hardware, and the caller must not read it as one.
+    controller that answers anything else — busy, a failure of its own, a
+    gateway that could not reach it — has not said whether the module is there,
+    and a module counted out here has no entities for as long as the entry is
+    loaded, so that raises and setup is retried.
     """
     for index in range(1, maximum + 1):
         register = base_address(module, index) + _PROBE_REGISTER
         try:
             await unit.read_holding_registers(register, 1)
-        except (ModbusExceptionError, ModbusTimeoutError):
+        except (IllegalDataAddressError, IllegalFunctionError, ModbusTimeoutError):
             return index - 1
     return maximum

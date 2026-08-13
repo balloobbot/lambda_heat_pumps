@@ -219,7 +219,14 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
         # Which registers the controller serves depends on its firmware, so the
         # modules are built from what it answers for — probed once here, before
         # the first poll reads them.
-        await self.device.async_setup()
+        try:
+            await self.device.async_setup()
+        except ModbusError as err:
+            # A controller that is busy or out of reach while it is being probed
+            # has not said what it serves, and a map read off a bad moment would
+            # be wrong for as long as the entry is loaded. Fail the setup and let
+            # Home Assistant try it again.
+            raise UpdateFailed(f"Error probing the controller: {err}") from err
 
         entry = self.config_entry
         entry.async_on_unload(

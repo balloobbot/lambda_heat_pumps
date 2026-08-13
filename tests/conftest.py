@@ -95,6 +95,8 @@ class Controller:
     # a refusal armed before setup is applied to the connection setup opens too —
     # which is how a controller that serves only part of a module block is set up.
     _refused: set[int] = field(default_factory=set)
+    # Registers it is too busy for, kept for the same reason.
+    _busy: set[int] = field(default_factory=set)
 
     _connections: list[MockModbusConnection] = field(default_factory=list)
 
@@ -148,8 +150,16 @@ class Controller:
     def answer_busy(self, address: int) -> None:
         """Answer any block covering this register with "busy" rather than a
         refusal, as a controller does when it cannot get to it right now."""
+        self._busy.add(address)
         for unit in self._units:
             unit.fail_read(address, ServerDeviceBusyError())
+
+    def stop_being_busy(self) -> None:
+        """The controller gets round to the blocks it had no time for."""
+        for address in self._busy:
+            for unit in self._units:
+                unit.fail_read(address, None)
+        self._busy.clear()
 
     def reads(self) -> list[ReadEvent]:
         """Every block read the controller has been asked for, in order."""
@@ -198,6 +208,8 @@ def controller() -> Iterator[Controller]:
             _refuse_absent_modules(unit)
             for address in device._refused:
                 unit.fail_read(address, IllegalDataAddressError())
+            for address in device._busy:
+                unit.fail_read(address, ServerDeviceBusyError())
             if device._offline:
                 unit.fail_requests(ModbusConnectionError("no route to host"))
             if unit not in device._units:
