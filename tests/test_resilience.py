@@ -74,6 +74,32 @@ async def test_only_the_failed_modules_entities_go_unavailable(
     assert state_of(hass, "eu08l_hp1_heating_cycling_total") != "unavailable"
 
 
+async def test_a_failed_modules_lifetime_counters_stay_available(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A gap in a lifetime counter is a gap in long-term statistics.
+
+    A heat pump that cannot be read has not un-generated the energy its counter
+    already reported, and the energy dashboard reads a missing total as one. So
+    the accumulating registers hold what they last read while the instantaneous
+    readings beside them go unavailable.
+    """
+    entry = await setup_entry(hass, controller, legacy=True)
+
+    controller.answer_busy(_HP1_FLOW_LINE)
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    assert state_of(hass, "eu08l_hp1_flow_line_temperature") == "unavailable"
+    assert (
+        state_of(hass, "eu08l_hp1_compressor_power_consumption_accumulated") == "100000"
+    )
+    assert (
+        state_of(hass, "eu08l_hp1_compressor_thermal_energy_output_accumulated")
+        == "400000"
+    )
+
+
 async def test_listeners_fire_only_once_every_module_has_been_tried(
     hass: HomeAssistant, controller: Controller
 ) -> None:

@@ -85,6 +85,10 @@ class LambdaSensorDescription(SensorEntityDescription):
     component: str | None = None
 
 
+# The state classes that feed long-term statistics.
+RUNNING_TOTALS = (SensorStateClass.TOTAL, SensorStateClass.TOTAL_INCREASING)
+
+
 def _temperature(key: str, **kwargs) -> LambdaSensorDescription:
     return LambdaSensorDescription(
         key=key,
@@ -498,13 +502,14 @@ class LambdaSensor(LambdaEntity, SensorEntity):
         attribute: str | None = None,
     ) -> None:
         """Bind the sensor to the field it reports."""
-        super().__init__(
-            coordinator,
-            description.key,
-            module,
-            index,
-            component=component or f"{module}{index}",
+        # A gap in a running total reads as a counter reset, so it holds what it
+        # last read rather than going unavailable with its module.
+        polled = (
+            None
+            if description.state_class in RUNNING_TOTALS
+            else component or f"{module}{index}"
         )
+        super().__init__(coordinator, description.key, module, index, component=polled)
         self.entity_description = description
         self._attr_translation_key = description.key
         self._component = component
