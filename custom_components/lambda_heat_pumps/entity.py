@@ -32,11 +32,16 @@ class LambdaEntity(CoordinatorEntity[LambdaCoordinator]):
         key: str,
         module: str | None = None,
         index: int | None = None,
+        component: str | None = None,
     ) -> None:
         """Give the entity its unique id and its device."""
         super().__init__(coordinator)
         self._module = module
         self._index = index
+        # Which sub-system a poll has to have read for this entity's value to be
+        # current. An entity whose value is derived or set by the user names
+        # none, and stays available whatever the controller answered.
+        self._polled = component
 
         entry = coordinator.config_entry
         # Installations created before Home Assistant named entities from their
@@ -49,3 +54,15 @@ class LambdaEntity(CoordinatorEntity[LambdaCoordinator]):
         module_prefix = f"{module}{index}_" if module else ""
         self._attr_unique_id = f"{legacy}{module_prefix}{key}"
         self._attr_device_info = coordinator.device_info(module, index)
+
+    @property
+    def available(self) -> bool:
+        """Whether what this entity reports is what the controller holds.
+
+        A sub-system the last poll could not read kept the values it had, which
+        are no longer the controller's — so its entities go unavailable while
+        the rest of the controller carries on reporting.
+        """
+        if self._polled is not None and self._polled in self.coordinator.failed:
+            return False
+        return super().available

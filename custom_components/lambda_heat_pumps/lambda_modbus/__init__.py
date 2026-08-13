@@ -31,20 +31,29 @@ module to the registers it actually answered for. A register it does not serve i
 dropped from that module's read plan, so it is never read and reads as ``None``,
 while everything else stays the ordinary typed component with the ordinary
 update.
+
+A poll reads each sub-system on its own and returns an :class:`UpdateReport`:
+one the controller could not answer for keeps the values it had and is named in
+the report, while the rest still refresh. Only the link itself failing raises.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from modbus_connection import IllegalDataAddressError, IllegalFunctionError
+from modbus_connection import (
+    IllegalDataAddressError,
+    IllegalFunctionError,
+    ModbusConnectionError,
+    ModbusError,
+)
 
 from .boiler import Boiler
 from .buffer import Buffer
 from .general import Ambient, EManager
 from .heat_pump import HeatPump, HeatPumpLowFirst
 from .heating_circuit import HeatingCircuit
-from .model import LambdaComponent
+from .model import LambdaComponent, UpdateReport
 from .ranges import (
     AMBIENT_RANGES,
     E_MANAGER_RANGES,
@@ -67,6 +76,7 @@ __all__ = [
     "LambdaComponent",
     "LambdaHeatPump",
     "Solar",
+    "UpdateReport",
 ]
 
 # What a controller answers with when a register is not there. Every other
@@ -141,6 +151,8 @@ class LambdaHeatPump:
         self.solar_modules: list[Solar] = []
         self.heating_circuits: list[HeatingCircuit] = []
 
+        self._polled: dict[str, LambdaComponent] | None = None
+
     async def async_setup(self) -> None:
         """Probe the controller and build each module from what it serves."""
         heat_pump_class = HeatPump if self._word_order == "big" else HeatPumpLowFirst
@@ -153,6 +165,25 @@ class LambdaHeatPump:
         self.buffers = await self._build_all(Buffer, "buff")
         self.solar_modules = await self._build_all(solar_class, "sol")
         self.heating_circuits = await self._build_all(HeatingCircuit, "hc")
+
+        # What a poll reads, in read order, named as the report names it. It is
+        # also the marker that setup ran: a setup that fails part-way leaves it
+        # None, so the next update probes the controller again.
+        self._polled = {
+            "ambient": self.ambient,
+            "e_manager": self.e_manager,
+            **{
+                f"{module}{index}": component
+                for module, components in (
+                    ("hp", self.heat_pumps),
+                    ("boil", self.boilers),
+                    ("buff", self.buffers),
+                    ("sol", self.solar_modules),
+                    ("hc", self.heating_circuits),
+                )
+                for index, component in enumerate(components, 1)
+            },
+        }
 
     async def _build_all[C: LambdaComponent](
         self, component_class: type[C], module: str
@@ -209,25 +240,31 @@ class LambdaHeatPump:
         )
         return component
 
-    @property
-    def components(self) -> tuple[LambdaComponent, ...]:
-        """Every sub-system that is polled."""
-        return (
-            self.ambient,
-            self.e_manager,
-            *self.heat_pumps,
-            *self.boilers,
-            *self.buffers,
-            *self.solar_modules,
-            *self.heating_circuits,
-        )
-
-    async def async_update(self) -> None:
-        """Refresh every sub-system.
+    async def async_update(self) -> UpdateReport:
+        """Refresh every sub-system, one at a time.
 
         Each module is read on its own, so they are independent: one that stops
-        answering raises, and the caller decides what that means, without the
-        others' reads riding on it.
+        answering keeps the values it had and is named in the report, while the
+        rest still refresh. Listeners fire only once every sub-system has been
+        tried, and only for the ones that did refresh — so what a listener reads
+        is one poll's worth of the controller, not half of it. A failure of the
+        link itself raises ``ModbusConnectionError`` rather than reporting a
+        silence that is not the controller's.
         """
-        for component in self.components:
-            await component.async_update()
+        if self._polled is None:
+            await self.async_setup()
+        assert self._polled is not None  # async_setup() builds it
+        updated: set[str] = set()
+        failed: dict[str, ModbusError] = {}
+        for name, component in self._polled.items():
+            try:
+                await component.async_update(notify=False)
+            except ModbusConnectionError:
+                raise
+            except ModbusError as err:
+                failed[name] = err
+            else:
+                updated.add(name)
+        for name in updated:
+            self._polled[name].notify()
+        return UpdateReport(updated, failed)
