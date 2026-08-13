@@ -39,8 +39,8 @@ class LambdaEntity(CoordinatorEntity[LambdaCoordinator]):
         self._module = module
         self._index = index
         # Which sub-system a poll has to have read for this entity's value to be
-        # current. An entity whose value is derived or set by the user names
-        # none, and stays available whatever the controller answered.
+        # current. An entity whose value is derived, accumulated or set by the
+        # user names none, and stays available whatever the controller answered.
         self._polled = component
 
         entry = coordinator.config_entry
