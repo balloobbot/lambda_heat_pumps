@@ -268,3 +268,29 @@ class LambdaHeatPump:
         for name in updated:
             self._polled[name].notify()
         return UpdateReport(updated, failed)
+
+    async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
+        """Every register this controller reads, undecoded — for diagnostics.
+
+        The poll list is the whole device here: nothing is read only at setup,
+        since the probe settles the read plan rather than building a component
+        of its own. So this is every register a poll asks for, and only those —
+        the ones the probe found this controller does not serve were dropped
+        from the plan and are absent.
+
+        A sub-system is read on its own, as a poll reads it, and one the
+        controller will not answer for is left out rather than taking the dump
+        down with it: a controller having trouble is the one whose registers are
+        worth reading. Only the link itself failing raises.
+        """
+        raw: dict[str, dict[int, int | bool]] = {}
+        for component in (self._polled or {}).values():
+            try:
+                values_by_space = await component.async_read_raw()
+            except ModbusConnectionError:
+                raise
+            except ModbusError:
+                continue
+            for space, values in values_by_space.items():
+                raw.setdefault(space, {}).update(values)
+        return {space: dict(sorted(values.items())) for space, values in raw.items()}

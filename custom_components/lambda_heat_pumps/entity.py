@@ -62,15 +62,16 @@ class LambdaEntity(CoordinatorEntity[LambdaCoordinator]):
         A sub-system the last poll could not read kept the values it had, which
         are no longer the controller's — so its entities go unavailable while
         the rest of the controller carries on reporting.
+
+        An entity that names no sub-system holds its own value and stays
+        available whatever happened to the poll, including a controller that is
+        gone for good: a gap in a running total reads as a counter reset and
+        takes the long-term statistics with it, and heat pumps are switched off
+        for the season as inverters are at night. That test comes first, above
+        the coordinator's own — a controller answering nothing at all is exactly
+        the case the totals have to survive. Saying whether the controller is
+        answering is a connectivity entity's job, not a counter's.
         """
-        if self._polled is None:
-            # A running total stays available whatever happened to the poll,
-            # including a controller that is gone for good: a gap in it reads as
-            # a counter reset and takes the long-term statistics with it, and
-            # heat pumps are switched off for the season as inverters are at
-            # night. Saying whether the controller is answering is a
-            # connectivity entity's job, not a counter's.
-            return True
-        if self._polled in self.coordinator.failed:
-            return False
-        return super().available
+        return self._polled is None or (
+            super().available and self._polled not in self.coordinator.failed
+        )

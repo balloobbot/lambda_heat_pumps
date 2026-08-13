@@ -31,11 +31,13 @@ async def test_the_dump_carries_the_raw_registers(
     entry = await setup_entry(hass, controller, legacy=True)
     registers = (await _diagnostics(hass, entry, hass_client))["registers"]
 
+    # Keyed by address space, as the mock backend replays a snapshot back in.
+    holding = registers["holding"]
     # The raw word, not the 34.12 °C the entity shows for it.
-    assert registers["1004"] == 3412
+    assert holding["1004"] == 3412
     # A 32-bit counter is two separate words here; the dump does not combine them.
-    assert registers["1020"] == 0x0001
-    assert registers["1021"] == 0x86A0
+    assert holding["1020"] == 0x0001
+    assert holding["1021"] == 0x86A0
 
 
 async def test_the_dump_covers_the_installed_modules_only(
@@ -45,7 +47,7 @@ async def test_the_dump_covers_the_installed_modules_only(
     entry = await setup_entry(hass, controller, legacy=True)
     diagnostics = await _diagnostics(hass, entry, hass_client)
 
-    addresses = {int(address) for address in diagnostics["registers"]}
+    addresses = {int(address) for address in diagnostics["registers"]["holding"]}
     assert 1004 in addresses  # the one heat pump
     assert 2002 in addresses  # the one boiler
     # A second heat pump is not installed, so its block is never read.
@@ -64,20 +66,57 @@ async def test_the_dump_keeps_going_past_a_refused_register(
 ) -> None:
     """A register the controller refuses drops out; the rest still comes through.
 
-    A truncated controller is the one whose dump is worth having, so the read
-    falls back to one register at a time and does not stop at the first refusal.
+    A truncated controller is the one whose dump is worth having. The read plan
+    was narrowed around the refused registers at setup, so the dump asks for
+    what is there and does not stop at the first register that is not.
     """
     controller.refuse(2004)  # inside the boiler block
     controller.refuse(2005)
     entry = await setup_entry(hass, controller, legacy=True)
-    registers = (await _diagnostics(hass, entry, hass_client))["registers"]
+    holding = (await _diagnostics(hass, entry, hass_client))["registers"]["holding"]
 
     # The served registers on both sides of the refusal are there.
-    assert registers["2002"] == 480
-    assert registers["2050"] == 520
+    assert holding["2002"] == 480
+    assert holding["2050"] == 520
     # The refused ones are simply absent, not an error that ended the dump.
-    assert "2004" not in registers
-    assert registers["5002"] == 340  # a later module still got read
+    assert "2004" not in holding
+    assert holding["5002"] == 340  # a later module still got read
+
+
+async def test_the_dump_says_what_the_last_poll_made_of_the_controller(
+    hass: HomeAssistant, controller: Controller, hass_client
+) -> None:
+    """A module that stopped answering is named, with what it said.
+
+    Without it a dump of a controller with one sulking module looks like a dump
+    of a healthy one, only with a few values that are quietly out of date.
+    """
+    entry = await setup_entry(hass, controller, legacy=True)
+    controller.answer_busy(1004)  # inside the heat pump's first block
+    await entry.runtime_data.async_refresh()
+    poll = (await _diagnostics(hass, entry, hass_client))["poll"]
+
+    assert "hp1" not in poll["updated"]
+    assert "boil1" in poll["updated"]
+    assert "hp1" in poll["failed"]
+    assert poll["failed"]["hp1"]  # the error, stringified
+
+
+async def test_a_module_that_will_not_answer_does_not_cost_the_dump(
+    hass: HomeAssistant, controller: Controller, hass_client
+) -> None:
+    """A controller having trouble is the one whose registers are worth reading.
+
+    The module that will not answer is simply missing from the dump; every other
+    one is read as usual, rather than the whole download coming back empty.
+    """
+    entry = await setup_entry(hass, controller, legacy=True)
+    controller.answer_busy(1004)  # inside the heat pump's first block
+    holding = (await _diagnostics(hass, entry, hass_client))["registers"]["holding"]
+
+    assert "1004" not in holding
+    assert holding["2002"] == 480  # the boiler still came through
+    assert holding["5002"] == 340
 
 
 async def test_the_dump_says_where_each_field_was_read_from(

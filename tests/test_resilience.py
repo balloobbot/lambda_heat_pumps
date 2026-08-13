@@ -13,10 +13,13 @@ as long as the entry stays loaded, so setup fails and is tried again instead.
 from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 from modbus_connection import ModbusConnectionError, ServerDeviceBusyError
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    mock_restore_cache_with_extra_data,
+)
 
 from custom_components.lambda_heat_pumps.const import DOMAIN, ENTRY_VERSION
 
@@ -124,6 +127,75 @@ async def test_a_silent_controller_leaves_the_totals_alone(
     )
     # Counted rather than read, and just as much worth keeping.
     assert state_of(hass, "eu08l_hp1_heating_cycling_total") != "unavailable"
+
+
+async def test_a_total_whose_register_is_gone_keeps_what_it_had(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A total that reads as nothing holds its value, across a restart too.
+
+    A controller whose firmware does not serve the counter block has not
+    un-generated the energy it already reported, so the counter picks up what it
+    last said rather than starting the statistics over at unknown.
+    """
+    mock_restore_cache_with_extra_data(
+        hass,
+        (
+            (
+                # The entity id comes from the sensor's name, not its unique id.
+                State("sensor.eu08l_hp1_compressor_power_accumulated", "100000"),
+                {"native_value": 100000, "native_unit_of_measurement": "Wh"},
+            ),
+        ),
+    )
+    controller.refuse(1020)  # the electrical counter, read as its own range
+    controller.refuse(1021)
+    await setup_entry(hass, controller, legacy=True)
+
+    assert (
+        state_of(hass, "eu08l_hp1_compressor_power_consumption_accumulated") == "100000"
+    )
+    # An instantaneous reading has no history to protect, and reads as usual.
+    assert state_of(hass, "eu08l_hp1_flow_line_temperature") == "34.12"
+
+
+async def test_a_module_that_stops_answering_is_logged_once(
+    hass: HomeAssistant, controller: Controller, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A module that keeps failing would otherwise say so on every poll."""
+    entry = await setup_entry(hass, controller, legacy=True)
+    coordinator = entry.runtime_data
+
+    controller.answer_busy(_HP1_FLOW_LINE)
+    caplog.clear()
+    await coordinator.async_refresh()
+    assert caplog.text.count("Failed to fetch hp1") == 1
+
+    await coordinator.async_refresh()
+    assert caplog.text.count("Failed to fetch hp1") == 1
+
+
+async def test_a_controller_that_answers_nothing_says_what_went_wrong(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A poll where nothing answered has to say what it ran into.
+
+    Home Assistant logs the message at error level and the traceback only at
+    debug, so one of the errors has to be in the message itself; the others ride
+    along on the cause for whoever turns debug on.
+    """
+    entry = await setup_entry(hass, controller, legacy=True)
+    coordinator = entry.runtime_data
+
+    controller.wedge()
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert not coordinator.last_update_success
+    error = coordinator.last_exception
+    assert "no answer" in str(error)
+    assert isinstance(error.__cause__, ExceptionGroup)
+    assert len(error.__cause__.exceptions) == len(coordinator.failed)
 
 
 async def test_listeners_fire_only_once_every_module_has_been_tried(
