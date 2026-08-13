@@ -46,7 +46,7 @@ The integration features **automatic module detection** and **smart configuratio
 - **Smart Defaults**: Applies optimal settings for your specific Lambda configuration
 - **Configuration Validation**: Prevents duplicate configurations and validates existing connections
 
-**Partial updates**: every module is read on its own, so a controller that cannot answer for one of them does not take the rest down with it. Only that module's entities go unavailable — they keep the values they last read rather than reporting them as current — while everything else carries on updating, and the next poll picks the module up again. Only a controller that cannot be reached at all makes the whole integration unavailable.
+**Partial updates**: every module is read on its own, so a controller that cannot answer for one of them does not take the rest down with it. Only that module's entities go unavailable — they keep the values they last read rather than reporting them as current — while everything else carries on updating, and the next poll picks the module up again. Only a controller that cannot be reached at all makes the whole integration unavailable. Accumulating totals are the exception: the controller's energy counters and the counters the integration keeps hold their last value instead, and pick it back up after a restart, because a gap in a total reads as a counter reset and takes the long-term statistics with it.
 
 #### Firmware Version
 The firmware version is only important to decide which sensors are available.<br>

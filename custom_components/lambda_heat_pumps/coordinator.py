@@ -203,6 +203,10 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
         # What the last poll could not read, by sub-system name. Those keep the
         # values they had, so the entities reading them say so.
         self.failed: dict[str, ModbusError] = {}
+        # What it did read, for the diagnostics download.
+        self.updated: set[str] = set()
+        # Which sub-systems were already failing, so only a new one is logged.
+        self._warned: frozenset[str] = frozenset()
 
     def component(self, module: str, index: int):
         """The modelled sub-system for one module, by 1-based index."""
@@ -282,6 +286,7 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
             self._polling = False
 
         self.failed = report.failed
+        self.updated = report.updated
 
         stale: dict[str, IllegalDataAddressError] = {
             name: err
@@ -310,11 +315,8 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
             # nothing behind it answers, so the link is never lost and never
             # re-established. Drop it after a few of these and the next poll
             # opens a fresh one, without reloading the entry.
-            first = next(iter(report.failed.values()))
-            if any(
-                isinstance(err, ModbusTimeoutError)
-                for err in report.failed.values()
-            ):
+            errors = list(report.failed.values())
+            if any(isinstance(err, ModbusTimeoutError) for err in errors):
                 self._timeouts += 1
                 if self._timeouts >= _TIMEOUTS_BEFORE_RECYCLING_THE_LINK:
                     _LOGGER.debug(
@@ -326,14 +328,20 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
                     except ModbusError as close_err:
                         # The link is dropped either way, so this is only worth a log.
                         _LOGGER.debug("Tearing the link down failed: %s", close_err)
-            raise UpdateFailed(f"Error reading the controller: {first}") from first
+            # Home Assistant logs the message at error level and the traceback
+            # only at debug, so one of the errors has to be in the message; the
+            # rest ride along on the cause for whoever turns debug on.
+            raise UpdateFailed(
+                f"Error reading the controller: {errors[0]}"
+            ) from ExceptionGroup("no sub-system answered", errors)
 
         self._timeouts = 0
-        if report.failed:
-            _LOGGER.debug(
-                "Kept the last values for %s",
-                "; ".join(f"{name}: {err}" for name, err in report.failed.items()),
-            )
+        # Only a sub-system that was not already failing is worth a line; one
+        # that keeps failing would otherwise repeat every poll, and one that
+        # recovers says so by its entities coming back.
+        for name in sorted(report.failed.keys() - self._warned):
+            _LOGGER.warning("Failed to fetch %s: %s", name, report.failed[name])
+        self._warned = frozenset(report.failed)
 
         for index in self.totals:
             heat_pump = self.component("hp", index)

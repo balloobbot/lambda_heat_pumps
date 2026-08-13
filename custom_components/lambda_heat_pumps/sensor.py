@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from functools import cached_property
 
 from homeassistant.components.sensor import (
     RestoreSensor,
@@ -84,9 +85,19 @@ class LambdaSensorDescription(SensorEntityDescription):
     # that do not belong to a module.
     component: str | None = None
 
+    @cached_property
+    def is_total(self) -> bool:
+        """Whether this sensor accumulates rather than measures.
 
-# The state classes that feed long-term statistics.
-RUNNING_TOTALS = (SensorStateClass.TOTAL, SensorStateClass.TOTAL_INCREASING)
+        A total feeds long-term statistics, which is what makes it worth holding
+        on to when the controller stops answering. Caching writes into the
+        instance dict rather than through ``__setattr__``, so the description
+        stays frozen.
+        """
+        return self.state_class in (
+            SensorStateClass.TOTAL,
+            SensorStateClass.TOTAL_INCREASING,
+        )
 
 
 def _temperature(key: str, **kwargs) -> LambdaSensorDescription:
@@ -487,8 +498,12 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class LambdaSensor(LambdaEntity, SensorEntity):
-    """A value the controller holds, read off the device model."""
+class LambdaSensor(LambdaEntity, RestoreSensor):
+    """A value the controller holds, read off the device model.
+
+    A total restores what it last reported, so a heat pump that is not answering
+    when Home Assistant starts does not leave a hole in its own history.
+    """
 
     entity_description: LambdaSensorDescription
 
@@ -505,39 +520,55 @@ class LambdaSensor(LambdaEntity, SensorEntity):
         """Bind the sensor to the field it reports."""
         # A gap in a running total reads as a counter reset, so it holds what it
         # last read rather than going unavailable with its module.
-        polled = (
-            None
-            if description.state_class in RUNNING_TOTALS
-            else component or f"{module}{index}"
-        )
+        polled = None if description.is_total else component or f"{module}{index}"
         super().__init__(coordinator, description.key, module, index, component=polled)
         self.entity_description = description
         self._attr_translation_key = description.key
         self._component = component
         self._attribute = attribute or description.key
 
-    @property
-    def native_value(self) -> float | str | None:
-        """The decoded field, or its label if it is one of the state codes."""
-        if self._component is not None:
-            component = getattr(self.coordinator.device, self._component)
-        else:
-            component = self.coordinator.component(self._module, self._index)
+    async def async_added_to_hass(self) -> None:
+        """Take a total's last value back up before the first poll lands."""
+        await super().async_added_to_hass()
+        if (
+            self.entity_description.is_total
+            and (last := await self.async_get_last_sensor_data()) is not None
+        ):
+            self._attr_native_value = last.native_value
+        self._process_data()
 
-        value = getattr(component, self._attribute)
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Take this poll's reading before the state is written."""
+        self._process_data()
+        super()._handle_coordinator_update()
+
+    def _process_data(self) -> None:
+        """Read the field this sensor reports, and hold on to it.
+
+        A total that reads as nothing keeps what it had: the controller has not
+        un-generated the energy it already counted, and publishing the gap would
+        take its long-term statistics with it.
+        """
+        value = getattr(self._source, self._attribute)
         if isinstance(value, LambdaState):
-            return value.label
-        return value
+            value = value.label
+        if value is not None or not self.entity_description.is_total:
+            self._attr_native_value = value
+
+    @property
+    def _source(self):
+        """The modelled sub-system this sensor reads its field off."""
+        if self._component is not None:
+            return getattr(self.coordinator.device, self._component)
+        return self.coordinator.component(self._module, self._index)
 
     @property
     def options(self) -> list[str] | None:
         """Every label a state register can report."""
         if self.entity_description.device_class is not SensorDeviceClass.ENUM:
             return None
-        if self._component is not None:
-            component = getattr(self.coordinator.device, self._component)
-        else:
-            component = self.coordinator.component(self._module, self._index)
+        component = self._source
         # declared_fields describes what the class declares, so it still has the
         # field even when the controller does not serve that register and it was
         # narrowed out of the read — the labels are the same either way.

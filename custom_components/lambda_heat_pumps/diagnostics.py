@@ -1,14 +1,19 @@
 """Diagnostics for the Lambda Heat Pumps integration.
 
-The download dumps the controller's raw registers — the undecoded words, block by
-block, exactly as they come off the wire. That is what makes a diagnostics
-download worth having here: a value that reads wrong in Home Assistant can be
-checked against the datasheet without a Modbus tool, and a register the
-integration does not model yet can be read straight out of the dump.
+The download dumps the controller's raw registers — the undecoded words, exactly
+as they come off the wire. That is what makes a diagnostics download worth having
+here: a value that reads wrong in Home Assistant can be checked against the
+datasheet without a Modbus tool, and the dump replays straight into the mock
+backend, so a bug report can back a regression test with no hardware.
+
+The device object reads them, over the same plan a poll uses, so this asks the
+controller for exactly what the integration asks it for and nothing else.
 
 Alongside it goes the layout the model resolved to: which address each field was
 read from, so a raw word in the dump can be tied to the entity that reports it,
-and a field the probe found unserved is visible by its absence.
+and a field the probe found unserved is visible by its absence — and what the
+last poll made of the controller, so a stale value has something to be read
+against.
 """
 
 from __future__ import annotations
@@ -17,11 +22,10 @@ from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
-from modbus_connection import ModbusExceptionError
+from modbus_connection import ModbusError
 
 from .const import CONF_HOST, MODULES
 from .coordinator import LambdaConfigEntry
-from .lambda_modbus.ranges import readable_ranges
 
 # The host is the one thing here that identifies where the user lives on their
 # network; everything else describes the appliance.
@@ -41,6 +45,12 @@ async def async_get_config_entry_diagnostics(
         },
         "detected_modules": coordinator.counts,
         "layout": _layout(coordinator),
+        # What the last poll came back with, so an entity holding a stale value
+        # can be tied to the sub-system that stopped answering.
+        "poll": {
+            "updated": sorted(coordinator.updated),
+            "failed": {name: str(err) for name, err in coordinator.failed.items()},
+        },
         "registers": await _async_read_registers(coordinator),
         # What the integration counts for itself, so a wrong cycle or energy
         # figure can be told apart from a wrong register.
@@ -77,33 +87,16 @@ def _layout(coordinator) -> dict[str, dict[str, int]]:
 
 
 async def _async_read_registers(coordinator) -> dict[str, Any]:
-    """The controller's raw holding registers, address -> value.
+    """The controller's raw registers, by address space and then address.
 
-    Reads the ranges the model polls; a range the controller refuses (a firmware
-    that does not serve every register a module could have) is retried one
-    register at a time, so the dump shows exactly the registers this controller
-    serves rather than stopping at the first it does not.
+    Read fresh, so it is the controller as it stands at download time, and over
+    the read plan setup settled: a register the probe found it does not serve
+    was dropped from the plan, so it is absent here for the same reason its
+    entity reads as unknown.
     """
-    registers: dict[int, int] = {}
-    for low, high in readable_ranges(coordinator.counts):
-        try:
-            values = await coordinator.unit.read_holding_registers(low, high - low + 1)
-        except ModbusExceptionError:
-            await _read_by_register(coordinator, low, high, registers)
-        else:
-            registers.update(zip(range(low, high + 1), values, strict=True))
-    # JSON object keys are strings; keep them numeric-looking and sorted so the
-    # dump reads like an address map.
-    return {str(address): registers[address] for address in sorted(registers)}
-
-
-async def _read_by_register(
-    coordinator, low: int, high: int, registers: dict[int, int]
-) -> None:
-    """Read a refused range a register at a time, keeping the served ones."""
-    for address in range(low, high + 1):
-        try:
-            (value,) = await coordinator.unit.read_holding_registers(address, 1)
-        except ModbusExceptionError:
-            continue  # a register this controller does not serve
-        registers[address] = value
+    try:
+        return await coordinator.device.async_read_raw()
+    except ModbusError as err:
+        # A download that says why it could not read the controller is worth
+        # more than one that fails and leaves the user with nothing.
+        return {"error": str(err)}
