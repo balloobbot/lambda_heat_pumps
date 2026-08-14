@@ -282,11 +282,15 @@ class LambdaHeatPump:
         controller will not answer for is left out rather than taking the dump
         down with it: a controller having trouble is the one whose registers are
         worth reading. Only the link itself failing raises.
+
+        A dump is not a poll, so it fires no listeners: the fields refresh, but
+        downloading diagnostics does not write a state for every entity off the
+        poll cycle.
         """
         raw: dict[str, dict[int, int | bool]] = {}
         for component in (self._polled or {}).values():
             try:
-                values_by_space = await component.async_read_raw()
+                values_by_space = await component.async_read_raw(notify=False)
             except ModbusConnectionError:
                 raise
             except ModbusError:
