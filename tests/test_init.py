@@ -6,7 +6,11 @@ import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import (
+    device_registry as dr,
+    entity_registry as er,
+    restore_state,
+)
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.lambda_heat_pumps.const import (
@@ -488,6 +492,34 @@ async def test_only_the_totals_are_enabled_by_default(
         "eu08l_hp1_heating_cop_daily",
     ):
         assert not enabled(unique_id), unique_id
+
+
+async def test_only_a_sensor_holding_a_value_asks_to_be_restored(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """Restoring is not free: the store writes every entity registered with it.
+
+    A register sensor reads straight through to the model, so it has nothing to
+    take back up after a restart. Only the sensors holding a value of their own
+    register — the counters, and the controller's accumulating registers.
+    """
+    await setup_entry(hass, controller, legacy=True)
+    registry = er.async_get(hass)
+    restored = restore_state.async_get(hass).entities
+
+    def asks_to_be_restored(unique_id: str) -> bool:
+        entity_id = registry.async_get_entity_id("sensor", DOMAIN, unique_id)
+        assert entity_id, unique_id
+        return entity_id in restored
+
+    assert asks_to_be_restored("eu08l_hp1_compressor_power_consumption_accumulated")
+    assert asks_to_be_restored("eu08l_hp1_heating_energy_total")
+
+    assert not asks_to_be_restored("eu08l_hp1_flow_line_temperature")
+    assert not asks_to_be_restored("eu08l_ambient_temperature")
+    # Derived from two counters that restore themselves, so it has nothing of
+    # its own to keep either.
+    assert not asks_to_be_restored("eu08l_hp1_heating_cop_total")
 
 
 async def test_a_float_unit_id_is_coerced_to_int(
