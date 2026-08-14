@@ -3,7 +3,8 @@
 Four kinds of sensor live here.
 
 **Register sensors** report a value the controller holds. They read it straight
-off the device model, which has already decoded it.
+off the device model, which has already decoded it. The few that accumulate —
+the controller's own energy counters — keep the last value they read instead.
 
 **Counters** report something the controller does not hold at all — how often it
 entered a mode, and how much energy it spent there. The coordinator counts both
@@ -41,6 +42,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.typing import StateType
 
 from .const import (
     CONF_ROOM_THERMOSTAT_CONTROL,
@@ -428,6 +430,18 @@ def _counter_descriptions() -> Iterable[CounterDescription]:
             yield _energy_description(mode, period, thermal=True)
 
 
+def _register_sensor(
+    description: LambdaSensorDescription,
+) -> type[LambdaSensor | LambdaTotalSensor]:
+    """Which kind of register sensor a description asks for.
+
+    Only a total has a value of its own to keep, and only it is worth handing to
+    Home Assistant's restore store — which writes every entity registered with
+    it to disk on a timer, whether or not that entity ever restores anything.
+    """
+    return LambdaTotalSensor if description.is_total else LambdaSensor
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: LambdaConfigEntry,
@@ -440,7 +454,7 @@ async def async_setup_entry(
     for description in CONTROLLER_SENSORS:
         prefix = next(p for p in CONTROLLER_COMPONENTS if description.key.startswith(p))
         entities.append(
-            LambdaSensor(
+            _register_sensor(description)(
                 coordinator,
                 description,
                 component=CONTROLLER_COMPONENTS[prefix],
@@ -451,7 +465,7 @@ async def async_setup_entry(
     for module, descriptions in MODULE_SENSORS.items():
         for index in range(1, coordinator.counts[module] + 1):
             entities += [
-                LambdaSensor(coordinator, d, module=module, index=index)
+                _register_sensor(d)(coordinator, d, module=module, index=index)
                 for d in descriptions
             ]
 
@@ -498,12 +512,8 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class LambdaSensor(LambdaEntity, RestoreSensor):
-    """A value the controller holds, read off the device model.
-
-    A total restores what it last reported, so a heat pump that is not answering
-    when Home Assistant starts does not leave a hole in its own history.
-    """
+class LambdaRegisterEntity(LambdaEntity):
+    """What the two kinds of register sensor share: which field they report."""
 
     entity_description: LambdaSensorDescription
 
@@ -527,34 +537,12 @@ class LambdaSensor(LambdaEntity, RestoreSensor):
         self._component = component
         self._attribute = attribute or description.key
 
-    async def async_added_to_hass(self) -> None:
-        """Take a total's last value back up before the first poll lands."""
-        await super().async_added_to_hass()
-        if (
-            self.entity_description.is_total
-            and (last := await self.async_get_last_sensor_data()) is not None
-        ):
-            self._attr_native_value = last.native_value
-        self._process_data()
-
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        """Take this poll's reading before the state is written."""
-        self._process_data()
-        super()._handle_coordinator_update()
-
-    def _process_data(self) -> None:
-        """Read the field this sensor reports, and hold on to it.
-
-        A total that reads as nothing keeps what it had: the controller has not
-        un-generated the energy it already counted, and publishing the gap would
-        take its long-term statistics with it.
-        """
+    def _read(self) -> StateType:
+        """This sensor's field, as the model last decoded it."""
         value = getattr(self._source, self._attribute)
         if isinstance(value, LambdaState):
-            value = value.label
-        if value is not None or not self.entity_description.is_total:
-            self._attr_native_value = value
+            return value.label
+        return value
 
     @property
     def _source(self):
@@ -562,6 +550,19 @@ class LambdaSensor(LambdaEntity, RestoreSensor):
         if self._component is not None:
             return getattr(self.coordinator.device, self._component)
         return self.coordinator.component(self._module, self._index)
+
+
+class LambdaSensor(LambdaRegisterEntity, SensorEntity):
+    """A value the controller holds, read straight off the device model.
+
+    There is nothing to keep here: the model holds the value, and the entity
+    goes unavailable with the module that stopped answering for it.
+    """
+
+    @property
+    def native_value(self) -> StateType:
+        """What the model holds for this field right now."""
+        return self._read()
 
     @property
     def options(self) -> list[str] | None:
@@ -575,6 +576,37 @@ class LambdaSensor(LambdaEntity, RestoreSensor):
         field = component.declared_fields[self._attribute]
         # The field's converter is the state enum it decodes to.
         return [state.label for state in field.convert]
+
+
+class LambdaTotalSensor(LambdaRegisterEntity, RestoreSensor):
+    """One of the controller's own accumulating counters.
+
+    It feeds long-term statistics, so it holds the last value it read and
+    restores it across a restart: a heat pump that is not answering when Home
+    Assistant starts does not leave a hole in its own history.
+    """
+
+    async def async_added_to_hass(self) -> None:
+        """Take the last value back up before the first poll lands."""
+        await super().async_added_to_hass()
+        if (last := await self.async_get_last_sensor_data()) is not None:
+            self._attr_native_value = last.native_value
+        self._process_data()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Take this poll's reading before the state is written."""
+        self._process_data()
+        super()._handle_coordinator_update()
+
+    def _process_data(self) -> None:
+        """Read the total, and keep the one we had if it reads as nothing.
+
+        The controller has not un-generated the energy it already counted, and
+        publishing the gap would take its long-term statistics with it.
+        """
+        if (value := self._read()) is not None:
+            self._attr_native_value = value
 
 
 class LambdaCounterSensor(LambdaEntity, RestoreSensor):
