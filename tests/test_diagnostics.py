@@ -138,6 +138,28 @@ async def test_the_dump_says_where_each_field_was_read_from(
     assert "actual_circulation_temperature" not in layout["boil1"]
 
 
+async def test_the_dump_does_not_pass_for_a_poll(
+    hass: HomeAssistant, controller: Controller, hass_client
+) -> None:
+    """A download reads the controller, but it is not a poll.
+
+    The registers are read fresh, so the fields do move on. Telling the
+    listeners about it would write a state for every entity off the poll cycle,
+    on a read the user asked for as a diagnostic.
+    """
+    entry = await setup_entry(hass, controller, legacy=True)
+    device = entry.runtime_data.device
+    fired: list[str] = []
+    device.ambient.add_update_listener(lambda: fired.append("ambient"))
+    device.heat_pumps[0].add_update_listener(lambda: fired.append("hp1"))
+
+    await _diagnostics(hass, entry, hass_client)
+    assert not fired
+
+    await entry.runtime_data.async_refresh()  # a poll still tells them
+    assert sorted(fired) == ["ambient", "hp1"]
+
+
 async def test_the_host_is_redacted(
     hass: HomeAssistant, controller: Controller, hass_client
 ) -> None:
