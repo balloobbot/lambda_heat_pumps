@@ -30,9 +30,9 @@ class UpdateReport:
     ``e_manager``, and one per installed module — ``hp1``, ``boil1``, ``hc2``.
 
     A failed sub-system kept its previous values and did not notify its
-    listeners; the error that failed it rides along. A dead link is never in
-    here — the update raises ``ModbusConnectionError`` instead of reporting
-    partial silence.
+    listeners; the error that failed it rides along. A controller that answered
+    nothing at all is never in here — the update raises instead of reporting
+    silence that is not one sub-system's.
     """
 
     updated: set[str]

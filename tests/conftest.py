@@ -147,6 +147,12 @@ class Controller:
         for unit in self._units:
             unit.fail_requests(ModbusTimeoutError("no answer"))
 
+    def time_out(self, address: int) -> None:
+        """Never answer a block covering this register, as a module that has
+        stopped talking does while the controller beside it still answers."""
+        for unit in self._units:
+            unit.fail_read(address, ModbusTimeoutError("no answer"))
+
     def answer_busy(self, address: int) -> None:
         """Answer any block covering this register with "busy" rather than a
         refusal, as a controller does when it cannot get to it right now."""

@@ -604,9 +604,23 @@ class LambdaTotalSensor(LambdaRegisterEntity, RestoreSensor):
 
         The controller has not un-generated the energy it already counted, and
         publishing the gap would take its long-term statistics with it.
+
+        A counter that dips by a hair is the same thing said differently: these
+        are 32-bit counters read as two registers, so a poll that catches the
+        controller mid-carry reads a value just below the last one. Home
+        Assistant would take that for a meter reset. Only a counter that can
+        just as well fall on its own — a ``TOTAL`` — is published as read.
         """
-        if (value := self._read()) is not None:
-            self._attr_native_value = value
+        if (value := self._read()) is None:
+            return
+        last = self._attr_native_value
+        if (
+            self.entity_description.state_class is SensorStateClass.TOTAL_INCREASING
+            and last is not None
+            and last * 0.99 <= value < last
+        ):
+            return  # ignore firmware issue causing minor decrease
+        self._attr_native_value = value
 
 
 class LambdaCounterSensor(LambdaEntity, RestoreSensor):

@@ -14,7 +14,11 @@ from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, State
-from modbus_connection import ModbusConnectionError, ServerDeviceBusyError
+from modbus_connection import (
+    ModbusConnectionError,
+    ModbusTimeoutError,
+    ServerDeviceBusyError,
+)
 import pytest
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -159,6 +163,55 @@ async def test_a_total_whose_register_is_gone_keeps_what_it_had(
     assert state_of(hass, "eu08l_hp1_flow_line_temperature") == "34.12"
 
 
+async def test_a_total_that_dips_by_a_hair_keeps_what_it_had(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A counter read mid-carry is not a meter reset.
+
+    The lifetime counters are 32 bits across two registers, and a controller
+    that serves them while it is updating them answers with a value a hair below
+    the last one. Published, Home Assistant reads the step backwards as the
+    meter having been replaced and starts the long-term statistics over.
+    """
+    entry = await setup_entry(hass, controller, legacy=True)
+
+    controller.registers[1021] = 0x869F  # 100000 Wh -> 99999 Wh
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    assert (
+        state_of(hass, "eu08l_hp1_compressor_power_consumption_accumulated") == "100000"
+    )
+
+    # And it takes the reading again as soon as the counter has caught up.
+    controller.registers[1021] = 0x86A1  # 100001 Wh
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    assert (
+        state_of(hass, "eu08l_hp1_compressor_power_consumption_accumulated") == "100001"
+    )
+
+
+async def test_a_total_that_really_falls_is_published(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A counter that starts over is a counter that started over.
+
+    Holding the old value there would be a total that never comes back down,
+    and the statistics would carry a step the heat pump never generated. Only a
+    dip small enough to be one torn reading is ignored.
+    """
+    entry = await setup_entry(hass, controller, legacy=True)
+
+    controller.registers[1020] = 0  # a replaced heat pump, counting from 5 kWh
+    controller.registers[1021] = 5000
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    assert state_of(hass, "eu08l_hp1_compressor_power_consumption_accumulated") == "5000"
+
+
 async def test_a_module_that_stops_answering_is_logged_once(
     hass: HomeAssistant, controller: Controller, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -178,7 +231,7 @@ async def test_a_module_that_stops_answering_is_logged_once(
 async def test_a_controller_that_answers_nothing_says_what_went_wrong(
     hass: HomeAssistant, controller: Controller
 ) -> None:
-    """A poll where nothing answered has to say what it ran into.
+    """A poll where every sub-system failed has to say what it ran into.
 
     Home Assistant logs the message at error level and the traceback only at
     debug, so one of the errors has to be in the message itself; the others ride
@@ -187,15 +240,18 @@ async def test_a_controller_that_answers_nothing_says_what_went_wrong(
     entry = await setup_entry(hass, controller, legacy=True)
     coordinator = entry.runtime_data
 
-    controller.wedge()
+    # A controller too busy for anything at all: it answers every sub-system,
+    # and what it answers is that it could not get to it.
+    for address in (0, 100, _HP1_FLOW_LINE, 2000, 5000):
+        controller.answer_busy(address)
     await coordinator.async_refresh()
     await hass.async_block_till_done()
 
     assert not coordinator.last_update_success
     error = coordinator.last_exception
-    assert "no answer" in str(error)
+    assert "exception code 6" in str(error)
     assert isinstance(error.__cause__, ExceptionGroup)
-    assert len(error.__cause__.exceptions) == len(coordinator.failed)
+    assert len(error.__cause__.exceptions) == len(coordinator.failed) == 5
 
 
 async def test_listeners_fire_only_once_every_module_has_been_tried(
@@ -243,6 +299,51 @@ async def test_a_dead_link_raises_instead_of_reporting(
 
     with pytest.raises(ModbusConnectionError):
         await entry.runtime_data.device.async_update()
+
+
+async def test_a_controller_that_answers_nothing_is_not_walked_module_by_module(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A first sub-system that times out ends the poll there.
+
+    Nothing has answered — not a value, and not a refusal either, which would at
+    least prove the controller is there. Reading on would pay a full timeout for
+    every module in turn, so one poll of a controller that is asleep or behind a
+    bridge that has stopped relaying takes minutes and reports the whole device
+    as a pile of stale values.
+    """
+    entry = await setup_entry(hass, controller)
+    controller.time_out(0)  # the ambient block, which a poll reads first
+    controller.forget_reads()
+
+    with pytest.raises(ModbusTimeoutError):
+        await entry.runtime_data.device.async_update()
+
+    # It asked once and stopped, rather than trying every module in turn.
+    assert len(controller.reads()) == 1
+
+
+async def test_a_module_that_times_out_after_another_answered_is_contained(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A timeout is only fatal while nothing has answered.
+
+    Once the controller has answered for something, a module that does not is
+    that module's problem — one slow block loses its own component and no more,
+    which is what reading them separately is for.
+    """
+    entry = await setup_entry(hass, controller, legacy=True)
+    coordinator = entry.runtime_data
+
+    controller.registers[2002] = 500  # the boiler, read after the heat pump
+    controller.time_out(_HP1_FLOW_LINE)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success
+    assert set(coordinator.failed) == {"hp1"}
+    assert isinstance(coordinator.failed["hp1"], ModbusTimeoutError)
+    assert state_of(hass, "eu08l_boil1_actual_high_temperature") == "50.0"
 
 
 async def test_a_controller_too_busy_to_be_probed_is_probed_again(

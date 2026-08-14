@@ -460,6 +460,29 @@ async def test_a_link_that_is_up_but_answers_nothing_is_recycled(
     assert state_of(hass, "eu08l_hp1_flow_line_temperature") == "34.12"
 
 
+async def test_one_module_timing_out_is_not_held_against_the_link(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """A timeout the poll contained says the controller is answering.
+
+    Only a poll that got nothing at all is evidence about the link. A single
+    module that has stopped talking — a heat pump switched off for the season —
+    would otherwise drop a link that is carrying the rest of the controller
+    perfectly well, every third poll, for as long as it stays off.
+    """
+    entry = await setup_entry(hass, controller, legacy=True)
+    coordinator = entry.runtime_data
+
+    controller.time_out(1004)  # the heat pump's first block
+    for _ in range(3):
+        await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success
+    assert set(coordinator.failed) == {"hp1"}
+    assert coordinator.connection.connected
+
+
 async def test_only_the_totals_are_enabled_by_default(
     hass: HomeAssistant, controller: Controller
 ) -> None:

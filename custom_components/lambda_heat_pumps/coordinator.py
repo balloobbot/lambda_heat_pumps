@@ -278,12 +278,31 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
             # it is down, over the same unit handles, so a drop costs at most the
             # poll it happened on and nothing has to be rebuilt.
             report = await self.device.async_update()
+        except ModbusTimeoutError as err:
+            # The controller answered nothing at all — a sub-system it merely
+            # would not answer for is reported, not raised. A controller behind
+            # a serial-to-network bridge can go on holding the socket open while
+            # nothing behind it answers, so the link is never lost and never
+            # re-established. Drop it after a few of these and the next poll
+            # opens a fresh one, without reloading the entry.
+            self._timeouts += 1
+            if self._timeouts >= _TIMEOUTS_BEFORE_RECYCLING_THE_LINK:
+                _LOGGER.debug("Recycling the link after %d timeouts", self._timeouts)
+                self._timeouts = 0
+                try:
+                    await self.connection.disconnect()
+                except ModbusError as close_err:
+                    # The link is dropped either way, so this is only worth a log.
+                    _LOGGER.debug("Tearing the link down failed: %s", close_err)
+            raise UpdateFailed(f"Error reading the controller: {err}") from err
         except ModbusError as err:
-            # Only the link itself failing gets this far — a sub-system the
-            # controller would not answer for is reported, not raised.
+            # The link itself failing; it re-establishes on the next poll.
             raise UpdateFailed(f"Error reading the controller: {err}") from err
         finally:
             self._polling = False
+
+        # A report at all means the controller is answering, whatever it said.
+        self._timeouts = 0
 
         self.failed = report.failed
         self.updated = report.updated
@@ -309,33 +328,17 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
             ) from next(iter(stale.values()))
 
         if report.failed and not report.updated:
-            # Nothing answered at all, so it is the controller that is not
-            # talking rather than one of its modules. A controller behind a
-            # serial-to-network bridge can go on holding the socket open while
-            # nothing behind it answers, so the link is never lost and never
-            # re-established. Drop it after a few of these and the next poll
-            # opens a fresh one, without reloading the entry.
-            errors = list(report.failed.values())
-            if any(isinstance(err, ModbusTimeoutError) for err in errors):
-                self._timeouts += 1
-                if self._timeouts >= _TIMEOUTS_BEFORE_RECYCLING_THE_LINK:
-                    _LOGGER.debug(
-                        "Recycling the link after %d timeouts", self._timeouts
-                    )
-                    self._timeouts = 0
-                    try:
-                        await self.connection.disconnect()
-                    except ModbusError as close_err:
-                        # The link is dropped either way, so this is only worth a log.
-                        _LOGGER.debug("Tearing the link down failed: %s", close_err)
+            # Every sub-system refused or failed in its own right. The controller
+            # is there — it answered each of them — so the link is sound and
+            # there is nothing to recycle; the poll still has no fresh values.
             # Home Assistant logs the message at error level and the traceback
             # only at debug, so one of the errors has to be in the message; the
             # rest ride along on the cause for whoever turns debug on.
+            errors = list(report.failed.values())
             raise UpdateFailed(
                 f"Error reading the controller: {errors[0]}"
             ) from ExceptionGroup("no sub-system answered", errors)
 
-        self._timeouts = 0
         # Only a sub-system that was not already failing is worth a line; one
         # that keeps failing would otherwise repeat every poll, and one that
         # recovers says so by its entities coming back.
