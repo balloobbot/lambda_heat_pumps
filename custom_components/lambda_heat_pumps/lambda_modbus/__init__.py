@@ -34,7 +34,9 @@ update.
 
 A poll reads each sub-system on its own and returns an :class:`UpdateReport`:
 one the controller could not answer for keeps the values it had and is named in
-the report, while the rest still refresh. Only the link itself failing raises.
+the report, while the rest still refresh. A silence that belongs to the whole
+controller rather than one module raises instead: the link failing, or the first
+sub-system timing out before anything has answered.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ from modbus_connection import (
     IllegalFunctionError,
     ModbusConnectionError,
     ModbusError,
+    ModbusTimeoutError,
 )
 
 from .boiler import Boiler
@@ -247,9 +250,13 @@ class LambdaHeatPump:
         answering keeps the values it had and is named in the report, while the
         rest still refresh. Listeners fire only once every sub-system has been
         tried, and only for the ones that did refresh — so what a listener reads
-        is one poll's worth of the controller, not half of it. A failure of the
-        link itself raises ``ModbusConnectionError`` rather than reporting a
-        silence that is not the controller's.
+        is one poll's worth of the controller, not half of it.
+
+        A silence that is not one module's raises rather than being reported: the
+        link itself failing, and a first sub-system that times out with nothing
+        having answered yet — walking the rest of a controller that is not
+        talking costs a full timeout per module and reports every one of them as
+        stale.
         """
         if self._polled is None:
             await self.async_setup()
@@ -261,6 +268,13 @@ class LambdaHeatPump:
                 await component.async_update(notify=False)
             except ModbusConnectionError:
                 raise
+            except ModbusTimeoutError as err:
+                if not updated and not failed:
+                    # Nothing has answered yet — not a value, not even a refusal,
+                    # which would at least prove the controller is there. Assume
+                    # the rest would time out too rather than paying for each.
+                    raise
+                failed[name] = err
             except ModbusError as err:
                 failed[name] = err
             else:
