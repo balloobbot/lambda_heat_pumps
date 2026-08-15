@@ -16,6 +16,10 @@ Two things shape them:
   its own, which forces a single-register read. The two 32-bit counters
   (relative 20-23) likewise get a range per counter — a range wide enough for
   the pair, so each counter is still read in one shot.
+
+That last point is why the capacity limits are a component of their own: eleven
+single-register reads is more than twice what the rest of a heat pump costs, and
+they hold settings, so they are worth a slower schedule.
 """
 
 from __future__ import annotations
@@ -34,8 +38,12 @@ _HP_RANGES: tuple[Range, ...] = (
     (20, 21),  # compressor_power_consumption_accumulated (int32)
     (22, 23),  # compressor_thermal_energy_output_accumulated (int32)
     (24, 33),
-    *((n, n) for n in range(50, 61)),  # capacity limits — one read each
 )
+
+# The capacity limits, one read each. They are the heat pump's own component and
+# their own poll: eleven requests for settings an installer changes, against five
+# for everything a heat pump measures.
+HP_CAPACITY_RANGES: tuple[Range, ...] = tuple((n, n) for n in range(50, 61))
 _BOIL_RANGES: tuple[Range, ...] = ((0, 5), (50, 50))
 _BUFF_RANGES: tuple[Range, ...] = ((0, 9), (50, 50))
 _SOL_RANGES: tuple[Range, ...] = ((0, 4), (5, 6), (50, 51))  # 5-6 is energy_total
@@ -83,7 +91,10 @@ def readable_ranges(counts: dict[str, int]) -> tuple[Range, ...]:
     """
     ranges = list(_MAIN_RANGES)
     for module, count in counts.items():
+        relative = _MODULE_RANGES[module]
+        if module == "hp":
+            relative += HP_CAPACITY_RANGES  # polled apart, but readable all the same
         for index in range(1, count + 1):
             base = base_address(module, index)
-            ranges += [(base + low, base + high) for low, high in _MODULE_RANGES[module]]
+            ranges += [(base + low, base + high) for low, high in relative]
     return tuple(sorted(ranges))

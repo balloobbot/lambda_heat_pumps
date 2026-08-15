@@ -398,3 +398,70 @@ async def test_a_module_the_controller_is_busy_for_is_still_detected(
 
     assert entry.runtime_data.counts["boil"] == 1
     assert state_of(hass, "eu08l_boil1_actual_high_temperature") == "48.0"
+
+
+async def test_the_capacity_limits_fail_on_their_own(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """Two polls, two failures: neither takes the other's entities down.
+
+    The limits are read apart from the heat pump they belong to, so a controller
+    that will not answer for them still reports everything the heat pump is
+    doing — and a heat pump that stops answering does not blank the limits, which
+    are as current as their own last read.
+    """
+    entry = await setup_entry(hass, controller, legacy=True)
+    coordinator = entry.runtime_data
+    (capacity,) = coordinator.capacity_limits
+
+    controller.answer_busy(1050)
+    await capacity.async_refresh()
+    await hass.async_block_till_done()
+
+    assert not capacity.last_update_success
+    assert state_of(hass, "eu08l_hp1_config_parameter_50") == "unavailable"
+    # The poll of the controller knows nothing about it, and neither do the
+    # entities it feeds.
+    assert coordinator.last_update_success
+    assert not coordinator.failed
+    assert state_of(hass, "eu08l_hp1_flow_line_temperature") == "34.12"
+
+    controller.stop_being_busy()
+    await capacity.async_refresh()
+
+    # Now the other way round: the heat pump's own block is the one that fails,
+    # while the limits read perfectly well.
+    controller.answer_busy(_HP1_FLOW_LINE)
+    await coordinator.async_refresh()
+    await capacity.async_refresh()
+    await hass.async_block_till_done()
+
+    assert set(coordinator.failed) == {"hp1"}
+    assert capacity.last_update_success
+    assert state_of(hass, "eu08l_hp1_flow_line_temperature") == "unavailable"
+    assert state_of(hass, "eu08l_hp1_config_parameter_50") == "0"
+
+
+async def test_the_capacity_poll_never_recycles_the_link(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """Liveness belongs to the poll of the controller, not to this one.
+
+    Both coordinators share the one connection, so both counting timeouts would
+    race to drop it — and this one, running hourly, could tear the link down
+    under a poll in flight. It reports its own failure and nothing more.
+    """
+    entry = await setup_entry(hass, controller, legacy=True)
+    coordinator = entry.runtime_data
+    (capacity,) = coordinator.capacity_limits
+    connection = coordinator.connection
+
+    controller.time_out(1050)
+    for _ in range(3):
+        await capacity.async_refresh()
+    await hass.async_block_till_done()
+
+    assert not capacity.last_update_success
+    # Three timed-out reads, and the link is still up: only the full poll drops it.
+    assert connection.connected
+    assert coordinator.last_update_success

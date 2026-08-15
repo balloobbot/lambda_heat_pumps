@@ -1,12 +1,16 @@
 """Polls the Lambda controller and tracks what has to be derived from it.
 
-Two things are read on a schedule:
+Three things are read on a schedule:
 
 * The **full poll** refreshes the whole register model in one pooled set of block
   reads. Entities read their values straight off it.
 * The **fast poll** reads two registers per heat pump — the operating state and
   the compressor rating. A compressor start can begin and end well inside one
   full-poll window, so the cycle counters would miss it otherwise.
+* The **capacity limits** of each heat pump, hourly, on a coordinator of their
+  own. They are an installer's settings, and the controller serves them one
+  register at a time, so polling them with the rest spent eleven of a poll's
+  twenty-three requests on values that hardly ever move.
 
 The rest of this module exists because two things cannot be read from the
 controller at all: how many times it has entered a mode, and how much energy it
@@ -40,6 +44,7 @@ from modbus_connection import (
 )
 
 from .const import (
+    CAPACITY_LIMIT_UPDATE_INTERVAL,
     CONF_FAST_UPDATE_INTERVAL,
     CONF_FIRMWARE_VERSION,
     CONF_HOST,
@@ -67,7 +72,7 @@ from .const import (
     SIGNAL_PERIOD_ROLLOVER,
     THERMAL_ENERGY_MODES,
 )
-from .lambda_modbus import LambdaHeatPump
+from .lambda_modbus import HeatPumpCapacityLimits, LambdaHeatPump
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -208,6 +213,9 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
         # Which sub-systems were already failing, so only a new one is logged.
         self._warned: frozenset[str] = frozenset()
 
+        # One per heat pump, built once the probe has settled what it serves.
+        self.capacity_limits: list[LambdaCapacityLimitCoordinator] = []
+
     def component(self, module: str, index: int):
         """The modelled sub-system for one module, by 1-based index."""
         return getattr(self.device, MODULES[module])[index - 1]
@@ -246,6 +254,11 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
             # be wrong for as long as the entry is loaded. Fail the setup and let
             # Home Assistant try it again.
             raise UpdateFailed(f"Error probing the controller: {err}") from err
+
+        self.capacity_limits = [
+            LambdaCapacityLimitCoordinator(self, index)
+            for index in range(1, len(self.device.capacity_limits) + 1)
+        ]
 
         entry = self.config_entry
         entry.async_on_unload(
@@ -477,3 +490,48 @@ class LambdaCoordinator(DataUpdateCoordinator[LambdaHeatPump]):
             return 0.0
         return delta
 
+
+class LambdaCapacityLimitCoordinator(DataUpdateCoordinator[None]):
+    """One heat pump's capacity limits, on their own hourly poll.
+
+    They are settings — an installer's, not the heat pump's — and the controller
+    serves them one register at a time, so reading them with everything else put
+    eleven of a poll's twenty-three requests into values that change perhaps
+    once a year. Nothing in the integration writes them, so there is nothing to
+    refresh after.
+
+    The values live on the component, so there is no report to carry: an entity
+    is available exactly when the last read succeeded.
+
+    Liveness stays with the full poll. That one runs every 30 s and touches the
+    whole controller, so it is what notices a silent one, and it alone counts
+    timeouts and recycles a wedged link. This coordinator only reports its own
+    failure: two of them counting timeouts over the one connection would race to
+    drop it, and this one could tear the link down under a poll in flight.
+    """
+
+    def __init__(self, main: LambdaCoordinator, index: int) -> None:
+        """Poll heat pump `index`'s limits, alongside the controller's poll."""
+        super().__init__(
+            main.hass,
+            _LOGGER,
+            name=f"{DOMAIN} hp{index} capacity limits",
+            config_entry=main.config_entry,
+            update_interval=timedelta(seconds=CAPACITY_LIMIT_UPDATE_INTERVAL),
+        )
+        self.main = main
+        self.index = index
+
+    @property
+    def component(self) -> HeatPumpCapacityLimits:
+        """The limits this polls, off the device the probe built."""
+        return self.main.device.capacity_limits[self.index - 1]
+
+    async def _async_update_data(self) -> None:
+        """Read the limits; the entities read them off the component."""
+        try:
+            await self.component.async_update()
+        except ModbusError as err:
+            raise UpdateFailed(
+                f"Error reading HP{self.index}'s capacity limits: {err}"
+            ) from err

@@ -43,6 +43,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     CONF_ROOM_THERMOSTAT_CONTROL,
@@ -66,8 +67,12 @@ from .const import (
     SIGNAL_PERIOD_ROLLOVER,
     THERMAL_ENERGY_MODES,
 )
-from .coordinator import LambdaConfigEntry, LambdaCoordinator
-from .entity import LambdaEntity
+from .coordinator import (
+    LambdaCapacityLimitCoordinator,
+    LambdaConfigEntry,
+    LambdaCoordinator,
+)
+from .entity import LambdaEntity, unique_id
 from .lambda_modbus.enums import HeatingCircuitOperatingState, LambdaState
 
 # --------------------------------------------------------------------------
@@ -218,6 +223,11 @@ HP_SENSORS: tuple[LambdaSensorDescription, ...] = (
     _percent("eqm_rating", precision=2),
     _percent("expansion_valve_opening_angle", precision=2),
     _count("config_parameter_33"),
+)
+
+# The capacity limits, read on their own slow poll rather than with the rest of
+# the heat pump. Same keys, so the entities they back are the ones that existed.
+HP_CAPACITY_SENSORS: tuple[LambdaSensorDescription, ...] = (
     _count("config_parameter_50"),
     _power("dhw_output_power_15c", unit=UnitOfPower.KILO_WATT, precision=1),
     _power("heating_min_output_power_15c", unit=UnitOfPower.KILO_WATT, precision=1),
@@ -469,6 +479,12 @@ async def async_setup_entry(
                 for d in descriptions
             ]
 
+    for capacity in coordinator.capacity_limits:
+        entities += [
+            LambdaCapacityLimitSensor(capacity, description)
+            for description in HP_CAPACITY_SENSORS
+        ]
+
     for index in range(1, coordinator.counts["hp"] + 1):
         # A yesterday counter mirrors the daily one it is paired with: the daily
         # counter hands its value over at midnight, on the way past zero.
@@ -550,6 +566,39 @@ class LambdaRegisterEntity(LambdaEntity):
         if self._component is not None:
             return getattr(self.coordinator.device, self._component)
         return self.coordinator.component(self._module, self._index)
+
+
+class LambdaCapacityLimitSensor(
+    CoordinatorEntity[LambdaCapacityLimitCoordinator], SensorEntity
+):
+    """One of a heat pump's capacity limits, off its own slow poll.
+
+    The value lives on the component, so there is no report to consult: the
+    entity is available exactly when the last read of the limits succeeded,
+    whatever the poll of the rest of the controller made of it.
+    """
+
+    _attr_has_entity_name = True
+    entity_description: LambdaSensorDescription
+
+    def __init__(
+        self,
+        coordinator: LambdaCapacityLimitCoordinator,
+        description: LambdaSensorDescription,
+    ) -> None:
+        """Bind the sensor to the limit it reports."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._attr_translation_key = description.key
+        self._attr_unique_id = unique_id(
+            coordinator.main, description.key, "hp", coordinator.index
+        )
+        self._attr_device_info = coordinator.main.device_info("hp", coordinator.index)
+
+    @property
+    def native_value(self) -> StateType:
+        """What the model holds for this limit right now."""
+        return getattr(self.coordinator.component, self.entity_description.key)
 
 
 class LambdaSensor(LambdaRegisterEntity, SensorEntity):

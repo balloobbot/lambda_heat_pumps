@@ -77,6 +77,9 @@ def _layout(coordinator) -> dict[str, dict[str, int]]:
     for module, attribute in MODULES.items():
         for index, component in enumerate(getattr(device, attribute), 1):
             components[f"{module}{index}"] = component
+    # Polled apart from the modules, so not in MODULES; still worth dumping.
+    for index, component in enumerate(device.capacity_limits, 1):
+        components[f"hp{index}_capacity_limits"] = component
     return {
         name: {
             field: resolved.address
