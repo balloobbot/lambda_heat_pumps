@@ -17,6 +17,25 @@ from .const import CONF_NAME_PREFIX, CONF_USE_LEGACY_MODBUS_NAMES
 from .coordinator import LambdaCoordinator
 
 
+def unique_id(
+    coordinator: LambdaCoordinator, key: str, module: str | None, index: int | None
+) -> str:
+    """The unique id an entity gets, for whichever coordinator polls it.
+
+    Shared so an entity that moved to a poll of its own keeps the id it had.
+    """
+    entry = coordinator.config_entry
+    # Installations created before Home Assistant named entities from their
+    # device prefix every unique id with the entry's name.
+    legacy = (
+        f"{entry.data[CONF_NAME_PREFIX].lower()}_"
+        if entry.data[CONF_USE_LEGACY_MODBUS_NAMES]
+        else ""
+    )
+    module_prefix = f"{module}{index}_" if module else ""
+    return f"{legacy}{module_prefix}{key}"
+
+
 class LambdaEntity(CoordinatorEntity[LambdaCoordinator]):
     """Identity and device info shared by every Lambda entity.
 
@@ -43,16 +62,7 @@ class LambdaEntity(CoordinatorEntity[LambdaCoordinator]):
         # user names none, and stays available whatever the controller answered.
         self._polled = component
 
-        entry = coordinator.config_entry
-        # Installations created before Home Assistant named entities from their
-        # device prefix every unique id with the entry's name.
-        legacy = (
-            f"{entry.data[CONF_NAME_PREFIX].lower()}_"
-            if entry.data[CONF_USE_LEGACY_MODBUS_NAMES]
-            else ""
-        )
-        module_prefix = f"{module}{index}_" if module else ""
-        self._attr_unique_id = f"{legacy}{module_prefix}{key}"
+        self._attr_unique_id = unique_id(coordinator, key, module, index)
         self._attr_device_info = coordinator.device_info(module, index)
 
     @property

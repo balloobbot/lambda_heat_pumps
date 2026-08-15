@@ -37,6 +37,11 @@ one the controller could not answer for keeps the values it had and is named in
 the report, while the rest still refresh. A silence that belongs to the whole
 controller rather than one module raises instead: the link failing, or the first
 sub-system timing out before anything has answered.
+
+One thing a poll does not read: each heat pump's capacity limits are a component
+of their own in :attr:`LambdaHeatPump.capacity_limits`, for the caller to read on
+a slower schedule. They hold what an installer set, and the controller serves
+them one register at a time, so they cost eleven requests to a heat pump's five.
 """
 
 from __future__ import annotations
@@ -54,12 +59,13 @@ from modbus_connection import (
 from .boiler import Boiler
 from .buffer import Buffer
 from .general import Ambient, EManager
-from .heat_pump import HeatPump, HeatPumpLowFirst
+from .heat_pump import HeatPump, HeatPumpCapacityLimits, HeatPumpLowFirst
 from .heating_circuit import HeatingCircuit
 from .model import LambdaComponent, UpdateReport
 from .ranges import (
     AMBIENT_RANGES,
     E_MANAGER_RANGES,
+    HP_CAPACITY_RANGES,
     Range,
     base_address,
     module_ranges,
@@ -75,6 +81,7 @@ __all__ = [
     "Buffer",
     "EManager",
     "HeatPump",
+    "HeatPumpCapacityLimits",
     "HeatingCircuit",
     "LambdaComponent",
     "LambdaHeatPump",
@@ -149,6 +156,8 @@ class LambdaHeatPump:
         self.ambient: Ambient
         self.e_manager: EManager
         self.heat_pumps: list[HeatPump] = []
+        # Read apart from the poll, on their own schedule; see async_setup.
+        self.capacity_limits: list[HeatPumpCapacityLimits] = []
         self.boilers: list[Boiler] = []
         self.buffers: list[Buffer] = []
         self.solar_modules: list[Solar] = []
@@ -164,12 +173,17 @@ class LambdaHeatPump:
         self.ambient = await self._build(Ambient, 0, AMBIENT_RANGES)
         self.e_manager = await self._build(EManager, 0, E_MANAGER_RANGES)
         self.heat_pumps = await self._build_all(heat_pump_class, "hp")
+        self.capacity_limits = await self._build_all(
+            HeatPumpCapacityLimits, "hp", HP_CAPACITY_RANGES
+        )
         self.boilers = await self._build_all(Boiler, "boil")
         self.buffers = await self._build_all(Buffer, "buff")
         self.solar_modules = await self._build_all(solar_class, "sol")
         self.heating_circuits = await self._build_all(HeatingCircuit, "hc")
 
-        # What a poll reads, in read order, named as the report names it. It is
+        # What a poll reads, in read order, named as the report names it. The
+        # capacity limits are deliberately not in here: they are polled on their
+        # own schedule, so they are in no report and fail on their own. It is
         # also the marker that setup ran: a setup that fails part-way leaves it
         # None, so the next update probes the controller again.
         self._polled = {
@@ -189,15 +203,20 @@ class LambdaHeatPump:
         }
 
     async def _build_all[C: LambdaComponent](
-        self, component_class: type[C], module: str
+        self,
+        component_class: type[C],
+        module: str,
+        relative_ranges: tuple[Range, ...] | None = None,
     ) -> list[C]:
-        """One component per installed module, each at its own 100-register block."""
+        """One component per installed module, each at its own 100-register block.
+
+        `relative_ranges` overrides the module's own runs, for a second component
+        sharing the block — the heat pump's capacity limits.
+        """
+        ranges = module_ranges(module) if relative_ranges is None else relative_ranges
         return [
             await self._build(
-                component_class,
-                base_address(module, index),
-                module_ranges(module),
-                index=index,
+                component_class, base_address(module, index), ranges, index=index
             )
             for index in range(1, self._counts[module] + 1)
         ]
@@ -283,14 +302,19 @@ class LambdaHeatPump:
             self._polled[name].notify()
         return UpdateReport(updated, failed)
 
+    @property
+    def _all_components(self) -> list[LambdaComponent]:
+        """Every component this controller has, whichever schedule reads it."""
+        return [*(self._polled or {}).values(), *self.capacity_limits]
+
     async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
         """Every register this controller reads, undecoded — for diagnostics.
 
-        The poll list is the whole device here: nothing is read only at setup,
-        since the probe settles the read plan rather than building a component
-        of its own. So this is every register a poll asks for, and only those —
-        the ones the probe found this controller does not serve were dropped
-        from the plan and are absent.
+        Nothing is read only at setup, since the probe settles the read plan
+        rather than building a component of its own. So this is every register
+        the integration asks for, on either schedule — the ones the probe found
+        this controller does not serve were dropped from the plan and are
+        absent.
 
         A sub-system is read on its own, as a poll reads it, and one the
         controller will not answer for is left out rather than taking the dump
@@ -302,7 +326,7 @@ class LambdaHeatPump:
         poll cycle.
         """
         raw: dict[str, dict[int, int | bool]] = {}
-        for component in (self._polled or {}).values():
+        for component in self._all_components:
             try:
                 values_by_space = await component.async_read_raw(notify=False)
             except ModbusConnectionError:

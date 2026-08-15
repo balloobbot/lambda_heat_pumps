@@ -123,6 +123,8 @@ async def test_unique_ids_are_unchanged(
         "eu08l_hp1_heating_energy_daily",
         "eu08l_hp1_heating_thermal_energy_monthly",
         "eu08l_hp1_heating_cop_total",
+        # A capacity limit: it moved to a poll of its own, and kept its id.
+        "eu08l_hp1_dhw_output_power_15c",
         "eu08l_boil1_target_high_temperature",
         "eu08l_hc1_heating_curve_flow_line_temperature_calc",
     ):
@@ -267,11 +269,12 @@ async def test_a_poll_asks_for_the_blocks_the_controller_answers(
 ) -> None:
     """Every declared run is one request, and no request spans two of them.
 
-    The registers the controller only serves one at a time — a heat pump's
-    capacity limits and a heating circuit's flow-line setpoint — are declared as
-    runs of their own for exactly this reason, so a poll asking for them singly
-    is the whole point of the map. Nothing here may be merged into its
-    neighbour, and no request may cross from one module's block into another's.
+    A heating circuit's flow-line setpoint is a register the controller only
+    serves on its own, so it is declared as a run of its own and a poll asks for
+    it singly. Nothing here may be merged into its neighbour, and no request may
+    cross from one module's block into another's.
+
+    The capacity limits are absent: they are read on their own schedule now.
     """
     entry = await setup_entry(hass, controller)
     controller.forget_reads()
@@ -281,19 +284,45 @@ async def test_a_poll_asks_for_the_blocks_the_controller_answers(
     assert blocks == [
         (0, 5),  # ambient
         (100, 5),  # e-manager
-        # Heat pump 1: the runs either side of the hole at 1014, a request per
-        # 32-bit counter, then the capacity limits one register at a time.
+        # Heat pump 1: the runs either side of the hole at 1014, then a request
+        # per 32-bit counter.
         (1000, 14),
         (1015, 5),
         (1020, 2),
         (1022, 2),
         (1024, 10),
-        *((address, 1) for address in range(1050, 1061)),
         (2000, 6),  # boiler 1
         (2050, 1),
         (5000, 7),  # heating circuit 1
         (5007, 1),  # its flow-line setpoint, only answered on its own
         (5050, 3),
+    ]
+
+
+async def test_the_capacity_limits_are_read_on_their_own_poll(
+    hass: HomeAssistant, controller: Controller
+) -> None:
+    """Eleven single-register reads leave the poll that runs every 30 seconds.
+
+    They were nearly half of its requests — eleven of twenty-three — for values
+    an installer sets. The full poll now costs twelve requests, and the limits
+    cost their eleven once an hour instead.
+    """
+    entry = await setup_entry(hass, controller)
+    coordinator = entry.runtime_data
+
+    controller.forget_reads()
+    await coordinator.async_refresh()
+    assert not [
+        event for event in controller.reads() if 1050 <= event.address <= 1060
+    ]
+    assert len(controller.reads()) == 12
+
+    (capacity,) = coordinator.capacity_limits
+    controller.forget_reads()
+    await capacity.async_refresh()
+    assert [(event.address, event.count) for event in controller.reads()] == [
+        (address, 1) for address in range(1050, 1061)
     ]
 
 
